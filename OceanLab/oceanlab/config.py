@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 TOOLBAR_ICON_DIR = PROJECT_DIR / "assets" / "oceanview_toolbar"
 PREFERENCES_FILE = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) / "OceanLab" / "settings.json"
