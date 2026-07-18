@@ -202,6 +202,16 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertTrue(all(control.box.winfo_reqwidth() == self.app.shared_variable_box.winfo_reqwidth() for control in controls))
         self.assertEqual(self.app.edc_check.cget("text"), "启用暗噪声校正")
         self.assertEqual(self.app.decouple_check.cget("state"), "disabled")
+        self.assertEqual(self.app.pl_normalize_check.cget("text"), "峰值归一化")
+        self.assertEqual(self.app.pl_turbo_check.cget("text"), "Turbo 渐变色")
+        self.assertEqual(
+            self.app.pl_normalize_check.box.winfo_reqwidth(),
+            self.app.shared_variable_box.winfo_reqwidth(),
+        )
+        self.assertEqual(
+            self.app.pl_turbo_check.box.winfo_reqheight(),
+            self.app.shared_variable_box.winfo_reqheight(),
+        )
 
         self.app.edc_check.configure(state="normal")
         before = bool(self.app.electric_dark_var.get())

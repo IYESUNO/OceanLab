@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..widgets import LargeCheckbutton
+
 
 def build_processing_workspace(app, parent) -> None:
     app.ttk.Label(parent, text="实时光谱处理", style="Section.TLabel").pack(anchor="w")
@@ -69,20 +71,20 @@ def build_pl_workspace(app, parent) -> None:
 
     option_row = app.ttk.Frame(parent, style="Card.TFrame")
     option_row.pack(fill="x", pady=(8, 6))
-    app.pl_normalize_check = app.ttk.Checkbutton(
+    app.pl_normalize_check = LargeCheckbutton(
         option_row,
         text="峰值归一化",
         variable=app.pl_normalize_var,
         command=app.on_pl_display_changed,
     )
     app.pl_normalize_check.pack(side="left")
-    app.pl_turbo_check = app.ttk.Checkbutton(
+    app.pl_turbo_check = LargeCheckbutton(
         option_row,
         text="Turbo 渐变色",
         variable=app.pl_turbo_var,
         command=app.on_pl_display_changed,
     )
-    app.pl_turbo_check.pack(side="left", padx=(10, 0))
+    app.pl_turbo_check.pack(side="left", padx=(8, 0))
     app.pl_clear_button = app.ttk.Button(option_row, text="清空全部", command=app.clear_pl_files)
     app.pl_clear_button.pack(side="right")
 
