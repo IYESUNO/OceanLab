@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.log
+**/tmp*/
+
+.build/
+build/
+dist/
+*.spec
+
+OceanLab/release/*.zip
+OceanLab/release/*.sha256.txt
+*.lnk
+
+# Local agent/project instructions are not part of the public repository.
+/AGENTS.md
+
+/Snipaste_*.png
+/design-qa.md
