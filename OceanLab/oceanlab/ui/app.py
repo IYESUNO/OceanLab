@@ -55,6 +55,7 @@ from .panels import (
     build_processing_workspace,
 )
 from .dialogs import center_dialog, close_modal
+from .widgets import LargeCheckbutton
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,7 @@ class OceanLabApp:
         self.simulation_mode = False
         self.sdk_available = False
         self.connection_pending = False
+        self.auto_connect_attempted = False
         self.acquiring = False
         self.device_info: DeviceInfo | None = None
         self.wavelengths: list[float] = []
@@ -309,6 +311,12 @@ class OceanLabApp:
         self.light_source_var = tk.BooleanVar(value=False)
         self.advanced_capability_var = tk.StringVar(value="连接设备后检测触发、校正和光源能力。")
         self.metrics_var = tk.StringVar(value="峰值: —    峰位: —    帧率: —")
+        self.peak_metric_var = tk.StringVar(value="峰值: —")
+        self.position_metric_var = tk.StringVar(value="峰位: —")
+        self.frame_metric_var = tk.StringVar(value="帧率: —")
+        self.peak_value_var = tk.StringVar(value="—")
+        self.position_value_var = tk.StringVar(value="—")
+        self.frame_value_var = tk.StringVar(value="—")
         self.single_history_warning_var = tk.StringVar(value="")
         self.cursor_var = tk.StringVar(value="光标: —")
         self.cursor_position_var = tk.StringVar(value="")
@@ -571,8 +579,8 @@ class OceanLabApp:
         style.map("Tool.TButton", background=[("active", "#dde7f0")])
         style.configure(
             "PlotTool.TButton",
-            font=("Segoe MDL2 Assets", 16),
-            padding=(8, 5),
+            font=("Segoe MDL2 Assets", 22),
+            padding=(10, 7),
             foreground="#26364a",
             background="#f8fafc",
             bordercolor="#cbd5e1",
@@ -581,8 +589,8 @@ class OceanLabApp:
         style.map("PlotTool.TButton", background=[("active", "#e5edf5")], bordercolor=[("active", "#94a3b8")])
         style.configure(
             "PlotToolActive.TButton",
-            font=("Segoe MDL2 Assets", 16),
-            padding=(8, 5),
+            font=("Segoe MDL2 Assets", 22),
+            padding=(10, 7),
             foreground="#ffffff",
             background="#0f6cbd",
             bordercolor="#0f6cbd",
@@ -626,6 +634,21 @@ class OceanLabApp:
             foreground=[("selected", "#0f172a")],
         )
         style.configure("Metric.TLabel", background="#f6f8fb", foreground="#334155", font=("Microsoft YaHei UI", 9), padding=(8, 4))
+        style.configure("MetricCompact.TFrame", background="#f6f8fb")
+        style.configure(
+            "MetricCaption.TLabel",
+            background="#f6f8fb",
+            foreground="#334155",
+            font=("Microsoft YaHei UI", 9),
+            padding=(4, 4, 1, 4),
+        )
+        style.configure(
+            "MetricValue.TLabel",
+            background="#f6f8fb",
+            foreground="#172033",
+            font=("Microsoft YaHei UI", 9),
+            padding=(1, 4, 3, 4),
+        )
         style.configure("Cursor.TLabel", background="#ffffff", foreground="#c21875", font=("Microsoft YaHei UI", 10, "bold"))
         style.configure("MetricSafe.TLabel", background="#e7f6ec", foreground="#176b3a", font=("Microsoft YaHei UI", 9, "bold"), padding=(8, 4))
         style.configure("MetricWarn.TLabel", background="#fff4ce", foreground="#8a4b08", font=("Microsoft YaHei UI", 9, "bold"), padding=(8, 4))
@@ -781,18 +804,23 @@ class OceanLabApp:
         name_labels = self.ttk.Frame(save_controls, style="Card.TFrame")
         name_labels.pack(fill="x", pady=(0, 5))
         self.ttk.Label(name_labels, text="当前变量", style="Card.TLabel").pack(side="left")
-        self.shared_variable_check = self.ttk.Checkbutton(
+        shared_variable_check = LargeCheckbutton(
             name_labels,
             text="共用",
             variable=self.share_variable_name_var,
             command=self.on_share_variable_name_changed,
         )
-        self.shared_variable_check.pack(side="left", padx=(10, 0))
+        self.shared_variable_check = shared_variable_check
+        shared_variable_check.pack(side="left", padx=(8, 0))
+        self.shared_variable_box = shared_variable_check.box
+        self.shared_variable_box_outline = shared_variable_check.box_outline
+        self.shared_variable_box_check = shared_variable_check.box_check
+        self.shared_variable_text = shared_variable_check.text_label
         self.ttk.Label(name_labels, text="末尾编号", style="Card.TLabel").pack(side="right", padx=(0, 7))
         base_name_shell = self.tk.Frame(
             save_controls,
             width=1,
-            height=40,
+            height=54,
             background="#ffffff",
             borderwidth=0,
             highlightthickness=1,
@@ -803,12 +831,14 @@ class OceanLabApp:
         base_name_shell.pack(fill="x")
         base_name_shell.grid_propagate(False)
         base_name_shell.columnconfigure(0, weight=1)
+        base_name_shell.columnconfigure(2, weight=0, minsize=82)
+        base_name_shell.columnconfigure(4, weight=0, minsize=38)
         base_name_shell.rowconfigure((0, 2), weight=1, uniform="base_name_stepper")
         self.base_name_entry = self.tk.Entry(
             base_name_shell,
             textvariable=self.base_name_var,
             width=36,
-            font=("Microsoft YaHei UI", 10),
+            font=("Microsoft YaHei UI", 11),
             background="#ffffff",
             foreground="#172033",
             insertbackground="#172033",
@@ -823,9 +853,9 @@ class OceanLabApp:
         self.position_entry = self.tk.Entry(
             base_name_shell,
             textvariable=self.position_var,
-            width=4,
+            width=6,
             justify="center",
-            font=("Microsoft YaHei UI", 10),
+            font=("Microsoft YaHei UI", 11),
             background="#ffffff",
             foreground="#172033",
             insertbackground="#172033",
@@ -839,7 +869,7 @@ class OceanLabApp:
         )
         base_name_arrow_options = {
             "master": base_name_shell,
-            "width": 3,
+            "width": 4,
             "font": ("Segoe UI Symbol", 8, "bold"),
             "foreground": "#183b66",
             "background": "#eef2f6",
@@ -910,8 +940,8 @@ class OceanLabApp:
                 self.plot_toolbar_images.append(icon)
                 button = self.ttk.Button(toolbar, image=icon, style="PlotTool.TButton", command=command)
             else:
-                button = self.ttk.Button(toolbar, text=fallback_icon, width=3, style="PlotTool.TButton", command=command)
-            button.pack(side="left", padx=(0, 3))
+                button = self.ttk.Button(toolbar, text=fallback_icon, width=4, style="PlotTool.TButton", command=command)
+            button.pack(side="left", padx=(0, 5))
             self.attach_tooltip(button, tooltip)
             if mode:
                 self.plot_tool_buttons[mode] = button
@@ -919,9 +949,58 @@ class OceanLabApp:
         metrics = self.ttk.Frame(main, style="Card.TFrame")
         self.metrics_bar = metrics
         metrics.pack(fill="x", padx=2, pady=(0, 7))
-        self.ttk.Label(metrics, textvariable=self.metrics_var, style="Metric.TLabel").pack(side="left")
-        self.saturation_label = self.ttk.Label(metrics, textvariable=self.saturation_var, style="Metric.TLabel")
-        self.saturation_label.pack(side="left", padx=(6, 0))
+        def compact_metric(caption: str, variable, value_width: int, background: str):
+            group = self.tk.Frame(
+                metrics,
+                background=background,
+                highlightthickness=1,
+                highlightbackground="#cbd5e1",
+                borderwidth=0,
+                padx=5,
+                pady=3,
+            )
+            group.pack(side="left", padx=(0, 5))
+            caption_label = self.tk.Label(
+                group,
+                text=caption,
+                background=background,
+                foreground="#334155",
+                font=("Microsoft YaHei UI", 9),
+                padx=0,
+                pady=0,
+            )
+            caption_label.pack(side="left")
+            value_label = self.tk.Label(
+                group,
+                textvariable=variable,
+                background=background,
+                foreground="#172033",
+                font=("Microsoft YaHei UI", 9, "bold"),
+                width=value_width,
+                anchor="w",
+                padx=2,
+                pady=0,
+            )
+            value_label.pack(side="left")
+            return group, value_label
+
+        self.peak_metric_group, self.peak_metric_label = compact_metric(
+            "峰值:", self.peak_value_var, 8, "#eef6ff"
+        )
+        self.position_metric_group, self.position_metric_label = compact_metric(
+            "峰位:", self.position_value_var, 10, "#f5f3ff"
+        )
+        self.frame_metric_group, self.frame_metric_label = compact_metric(
+            "帧率:", self.frame_value_var, 9, "#f0fdf4"
+        )
+        self.saturation_label = self.ttk.Label(
+            metrics,
+            textvariable=self.saturation_var,
+            style="Metric.TLabel",
+            width=12,
+            anchor="w",
+        )
+        self.saturation_label.pack(side="left", padx=(3, 0))
         self.single_history_warning_label = self.ttk.Label(
             main,
             textvariable=self.single_history_warning_var,
@@ -944,8 +1023,8 @@ class OceanLabApp:
         self.ttk.Label(cursor_bar, textvariable=self.cursor_axis_name_var, style="Card.TLabel").pack(side="left", padx=(14, 5))
         cursor_shell = self.tk.Frame(
             cursor_bar,
-            width=136,
-            height=32,
+            width=190,
+            height=48,
             background="#ffffff",
             borderwidth=0,
             highlightthickness=1,
@@ -961,7 +1040,7 @@ class OceanLabApp:
             cursor_shell,
             textvariable=self.cursor_position_var,
             justify="right",
-            font=("Microsoft YaHei UI", 10),
+            font=("Microsoft YaHei UI", 11),
             background="#ffffff",
             foreground="#172033",
             insertbackground="#172033",
@@ -973,7 +1052,7 @@ class OceanLabApp:
         self.tk.Frame(cursor_shell, width=1, background="#94a3b8").grid(row=0, column=1, rowspan=3, sticky="ns")
         cursor_arrow_options = {
             "master": cursor_shell,
-            "width": 3,
+            "width": 4,
             "font": ("Segoe MDL2 Assets", 10),
             "foreground": "#183b66",
             "background": "#eef2f6",
@@ -992,7 +1071,14 @@ class OceanLabApp:
         self.cursor_down_button = self.tk.Button(text="\ueddc", command=lambda: self.step_data_cursor(-1), **cursor_arrow_options)
         self.cursor_down_button.grid(row=2, column=2, sticky="nsew")
         self.ttk.Label(cursor_bar, textvariable=self.cursor_unit_var, style="Card.TLabel").pack(side="left", padx=(6, 16))
-        self.ttk.Label(cursor_bar, textvariable=self.cursor_var, style="Cursor.TLabel").pack(side="left")
+        self.cursor_value_label = self.ttk.Label(
+            cursor_bar,
+            textvariable=self.cursor_var,
+            style="Cursor.TLabel",
+            width=15,
+            anchor="e",
+        )
+        self.cursor_value_label.pack(side="left")
         self.cursor_position_entry.bind("<Return>", self.apply_cursor_position)
         self.cursor_position_entry.bind("<FocusOut>", self.apply_cursor_position)
         self.cursor_position_entry.bind("<Up>", lambda _event: (self.step_data_cursor(1), "break")[1])
@@ -1487,7 +1573,7 @@ class OceanLabApp:
             return None
         try:
             image = self.tk.PhotoImage(file=str(path))
-            return image.subsample(5, 5)
+            return image.zoom(3, 3).subsample(10, 10)
         except (OSError, self.tk.TclError):
             logger.warning("Unable to load bundled toolbar icon: %s", path, exc_info=True)
             return None
@@ -1770,7 +1856,7 @@ class OceanLabApp:
             adjust_command,
         )
         shell.pack(side="left", padx=(0, 4))
-        unit_cell = self.ttk.Frame(editor_row, width=55, height=48, style="Card.TFrame")
+        unit_cell = self.ttk.Frame(editor_row, width=72, height=48, style="Card.TFrame")
         unit_cell.pack(side="left", fill="y")
         unit_cell.grid_propagate(False)
         unit_cell.columnconfigure(0, weight=1)
@@ -1783,7 +1869,7 @@ class OceanLabApp:
                 textvariable=unit_variable,
                 values=("ms", "s"),
                 state="readonly",
-                width=4,
+                width=5,
             )
             self.integration_unit_combo.grid(row=0, column=0, sticky="nsew")
         elif suffix:
@@ -2070,7 +2156,16 @@ class OceanLabApp:
             self.status_var.set(f"已切换到{INTEGRATION_PRESET_NAMES[requested_index]}")
         self.restore_active_preset_single_capture()
 
+    def render_shared_variable_check(self) -> None:
+        if not hasattr(self, "shared_variable_check"):
+            return
+        self.shared_variable_check.render()
+
+    def toggle_shared_variable_name(self) -> None:
+        self.shared_variable_check.invoke()
+
     def on_share_variable_name_changed(self) -> None:
+        self.render_shared_variable_check()
         current_name = self.base_name_var.get().strip()
         if self.share_variable_name_var.get():
             self.acquisition_presets[self._active_integration_preset]["base_name"] = current_name
@@ -2338,19 +2433,16 @@ class OceanLabApp:
             "trigger": bool(settings.get("trigger_supported", False)),
             "light_source": bool(settings.get("light_source_supported", False)),
         }
-        trigger_mode = int(settings.get("trigger_mode", 0))
-        trigger_label = TRIGGER_VALUE_TO_LABEL.get(trigger_mode, TRIGGER_MODE_OPTIONS[0])
         self._syncing_settings = True
         try:
-            self.trigger_mode_var.set(trigger_label)
-            # Match OceanView's startup policy: when the connected device
-            # supports electric-dark correction, request it on the first
-            # configuration instead of inheriting a possibly disabled SDK
-            # session value.  The adapter still writes and verifies the value,
-            # and the user may turn it off explicitly after connection.
+            # Match OceanView's initial device defaults rather than inheriting
+            # optional settings left behind by an earlier SDK session. These
+            # values are written to the instrument and verified by the first
+            # atomic configuration after connection.
+            self.trigger_mode_var.set(TRIGGER_MODE_OPTIONS[0])
             self.electric_dark_var.set(self.device_capabilities["electric_dark"])
-            self.nonlinearity_var.set(bool(settings.get("nonlinearity")))
-            self.light_source_var.set(bool(settings.get("light_source")))
+            self.nonlinearity_var.set(False)
+            self.light_source_var.set(False)
             self.decouple_var.set(False)
         finally:
             self._syncing_settings = False
@@ -2432,7 +2524,7 @@ class OceanLabApp:
             self.cursor_position_var.set(f"{x:.0f}")
         else:
             self.cursor_position_var.set(f"{x:.2f}")
-        self.cursor_var.set(f"强度: {y:.6g}")
+        self.cursor_var.set(f"强度: {y:.2f}")
 
     def update_cursor_axis_labels(self) -> None:
         if self.current_plot_uses_pixels():
@@ -3177,9 +3269,24 @@ class OceanLabApp:
             fps = self.current_fps()
             frame_text = "历史文件" if historical else f"{fps:.2f} fps" if fps > 0 else "单帧"
             peak_text = f"pixel {peak_x:.0f}" if self.current_plot_uses_pixels() else f"{peak_x:.2f} nm"
-            self.metrics_var.set(f"峰值: {peak_y:.5g}    峰位: {peak_text}    帧率: {frame_text}")
+            peak_metric = f"峰值: {peak_y:.2f}"
+            position_metric = f"峰位: {peak_text}"
+            frame_metric = f"帧率: {frame_text}"
+            self.metrics_var.set(f"{peak_metric}    {position_metric}    {frame_metric}")
+            self.peak_metric_var.set(peak_metric)
+            self.position_metric_var.set(position_metric)
+            self.frame_metric_var.set(frame_metric)
+            self.peak_value_var.set(f"{peak_y:.2f}")
+            self.position_value_var.set(peak_text)
+            self.frame_value_var.set(frame_text)
         else:
             self.metrics_var.set("峰值: —    峰位: —    帧率: —")
+            self.peak_metric_var.set("峰值: —")
+            self.position_metric_var.set("峰位: —")
+            self.frame_metric_var.set("帧率: —")
+            self.peak_value_var.set("—")
+            self.position_value_var.set("—")
+            self.frame_value_var.set("—")
 
         raw_values = [value for value in self.raw_spectrum if math.isfinite(value)]
         if not historical and raw_values and self.device_info and self.device_info.max_intensity > 0:
@@ -3717,6 +3824,20 @@ class OceanLabApp:
             self.status_var.set(f"保存验证失败：{path}")
             messagebox.showerror("保存失败", f"文件未通过保存验证，不会显示为保存成功。\n\n{exc}\n\n目标位置：{path}")
 
+    def handle_sdk_ready(self, version_numbers: tuple[int, ...]) -> None:
+        version = ".".join(map(str, version_numbers))
+        self.sdk_available = True
+        self.sdk_footer_var.set(f"SDK: {self.sdk_home}")
+        self.set_sdk_selector_visible(False)
+        self.save_preferences()
+        if not self.simulation_mode and not self.auto_connect_attempted:
+            self.auto_connect_attempted = True
+            self.status_var.set(f"OceanDirect SDK {version} 已就绪；正在自动检测仪器…")
+            self.root.after(100, self.toggle_connection)
+        elif not self.simulation_mode:
+            self.status_var.set(f"OceanDirect SDK {version} 已就绪；请选择连接仪器或模拟模式")
+        self.update_connection_buttons()
+
     def poll_events(self) -> None:
         from tkinter import messagebox
 
@@ -3727,14 +3848,7 @@ class OceanLabApp:
                 event, payload = self.events.get_nowait()
                 processed_events += 1
                 if event == "sdk_ready":
-                    version = ".".join(map(str, payload["version"]))
-                    self.sdk_available = True
-                    self.sdk_footer_var.set(f"SDK: {self.sdk_home}")
-                    self.set_sdk_selector_visible(False)
-                    self.save_preferences()
-                    if not self.simulation_mode:
-                        self.status_var.set(f"OceanDirect SDK {version} 已就绪；请选择连接仪器或模拟模式")
-                    self.update_connection_buttons()
+                    self.handle_sdk_ready(tuple(payload["version"]))
                 elif event == "connected":
                     if self.simulation_mode:
                         self.exit_simulation_mode(switching_to_device=True)

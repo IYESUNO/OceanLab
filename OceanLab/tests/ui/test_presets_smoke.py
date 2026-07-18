@@ -62,6 +62,8 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertEqual(self.app.integration_spin.winfo_width(), self.app.averages_spin.winfo_width())
         self.assertEqual(self.app.integration_spin.winfo_rootx(), self.app.averages_spin.winfo_rootx())
         self.assertEqual(self.app.integration_spin.master.master.pack_info()["padx"], (64, 0))
+        self.assertGreaterEqual(int(self.app.integration_unit_combo.master.cget("width")), 70)
+        self.assertGreaterEqual(self.app.integration_unit_combo.winfo_width(), 70)
         self.assertEqual(len(self.app.integration_preset_buttons), 3)
         self.assertTrue(all(str(button.cget("state")) == "normal" for button in self.app.integration_preset_buttons))
         self.assertTrue(all(int(button.master.cget("width")) == 42 for button in self.app.integration_preset_buttons))
@@ -171,6 +173,7 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
 
         self.app.share_variable_name_var.set(True)
         self.app.on_share_variable_name_changed()
+        self.assertEqual(self.app.shared_variable_box.itemcget(self.app.shared_variable_box_check, "state"), "normal")
         self.switch_to("预设1")
         self.assertEqual(self.app.base_name_var.get(), "PresetTwo")
         self.app.base_name_var.set("SharedName")
@@ -179,12 +182,42 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
 
         self.app.share_variable_name_var.set(False)
         self.app.on_share_variable_name_changed()
+        self.assertEqual(self.app.shared_variable_box.itemcget(self.app.shared_variable_box_check, "state"), "hidden")
         self.assertEqual(self.app.base_name_var.get(), "PresetTwo")
         self.switch_to("预设1")
         self.assertEqual(self.app.base_name_var.get(), "PresetOne")
         saved = self.app.load_preferences()
         self.assertFalse(saved["share_variable_name"])
         self.assertEqual(saved["shared_base_name"], "SharedName")
+
+    def test_acquisition_option_checkboxes_match_large_shared_control(self) -> None:
+        controls = (
+            self.app.edc_check,
+            self.app.nl_check,
+            self.app.decouple_check,
+            self.app.light_source_check,
+        )
+        self.assertTrue(all(control.box.winfo_reqwidth() >= 32 for control in controls))
+        self.assertTrue(all(control.box.winfo_reqheight() >= 32 for control in controls))
+        self.assertTrue(all(control.box.winfo_reqwidth() == self.app.shared_variable_box.winfo_reqwidth() for control in controls))
+        self.assertEqual(self.app.edc_check.cget("text"), "启用暗噪声校正")
+        self.assertEqual(self.app.decouple_check.cget("state"), "disabled")
+
+        self.app.edc_check.configure(state="normal")
+        before = bool(self.app.electric_dark_var.get())
+        self.app.edc_check.invoke()
+        self.assertEqual(bool(self.app.electric_dark_var.get()), not before)
+        expected_check_state = "normal" if not before else "hidden"
+        self.assertEqual(
+            self.app.edc_check.box.itemcget(self.app.edc_check.box_check, "state"),
+            expected_check_state,
+        )
+
+        self.app.edc_check.configure(state="disabled")
+        disabled_value = bool(self.app.electric_dark_var.get())
+        self.app.edc_check.invoke()
+        self.assertEqual(bool(self.app.electric_dark_var.get()), disabled_value)
+        self.assertEqual(self.app.edc_check.text_label.cget("foreground"), "#94a3b8")
 
     def test_saved_single_capture_history_is_per_preset_and_continuous_is_live_only(self) -> None:
         self.app.enter_simulation_mode()
@@ -312,12 +345,32 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
     def test_save_panel_is_fixed_below_scrollable_acquisition_area(self) -> None:
         self.root.update_idletasks()
         self.assertEqual(int(self.app.sidebar_notebook.master.cget("width")), 570)
-        self.assertEqual(int(self.app.cursor_shell.cget("width")), 136)
+        self.assertEqual(int(self.app.cursor_shell.cget("width")), 190)
+        self.assertEqual(int(self.app.cursor_shell.cget("height")), 48)
         self.assertGreaterEqual(self.app.stop_button.winfo_width(), 92)
         self.assertEqual(int(self.app.integration_spin.master.cget("height")), 48)
         self.assertEqual(int(self.app.averages_spin.master.cget("height")), 48)
         self.assertEqual(int(self.app.integration_unit_combo.master.cget("height")), 48)
-        self.assertEqual(int(self.app.base_name_shell.cget("height")), 40)
+        self.assertGreaterEqual(int(self.app.status_lamp.cget("width")), 30)
+        self.assertGreaterEqual(int(self.app.status_lamp.cget("height")), 26)
+        self.assertEqual(len(self.app.plot_toolbar_images), 8)
+        self.assertTrue(all(image.width() >= 38 and image.height() >= 38 for image in self.app.plot_toolbar_images))
+        self.assertEqual(len(self.app.plot_toolbar.winfo_children()), 8)
+        self.assertEqual(int(self.app.peak_metric_label.cget("width")), 8)
+        self.assertEqual(int(self.app.position_metric_label.cget("width")), 10)
+        self.assertEqual(int(self.app.frame_metric_label.cget("width")), 9)
+        self.assertEqual(self.app.peak_metric_group.cget("background"), "#eef6ff")
+        self.assertEqual(self.app.position_metric_group.cget("background"), "#f5f3ff")
+        self.assertEqual(self.app.frame_metric_group.cget("background"), "#f0fdf4")
+        self.assertEqual(self.app.peak_metric_label.cget("anchor"), "w")
+        self.assertEqual(self.app.position_metric_label.cget("anchor"), "w")
+        self.assertEqual(self.app.frame_metric_label.cget("anchor"), "w")
+        self.assertEqual(int(self.app.saturation_label.cget("width")), 12)
+        self.assertEqual(int(self.app.cursor_value_label.cget("width")), 15)
+        self.assertEqual(int(self.app.base_name_shell.cget("height")), 54)
+        self.assertGreaterEqual(int(self.app.base_name_shell.grid_columnconfigure(2)["minsize"]), 82)
+        self.assertGreaterEqual(self.app.shared_variable_box.winfo_reqwidth(), 32)
+        self.assertGreaterEqual(self.app.shared_variable_box.winfo_reqheight(), 32)
         panel_y = self.app.sidebar_save_panel.winfo_rooty()
         panel_height = self.app.sidebar_save_panel.winfo_height()
         notebook_bottom = self.app.sidebar_notebook.winfo_rooty() + self.app.sidebar_notebook.winfo_height()
@@ -481,9 +534,32 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
             self.app.plot.canvas.coords(first_legend_line)[2],
             self.app.plot.canvas.bbox(first_legend_text)[0],
         )
+        first_legend_box = self.app.plot.canvas.bbox("legend_text_0")
+        second_legend_box = self.app.plot.canvas.bbox("legend_text_1")
+        self.assertLess(first_legend_box[3], second_legend_box[1])
+        y_title_box = self.app.plot.canvas.bbox("y_axis_title")
+        y_tick_box = self.app.plot.canvas.bbox("y_tick_label")
+        self.assertLess(y_title_box[2] + 10, y_tick_box[0])
+        x_tick_box = self.app.plot.canvas.bbox("x_tick_label")
+        x_title_box = self.app.plot.canvas.bbox("x_axis_title")
+        self.assertLess(x_tick_box[3], x_title_box[1])
         self.app.plot.set_data([1.0, 2.0], [5.0, 6.0], "强度 (counts)")
         self.assertEqual(len(self.app.plot.series), 1)
         self.assertEqual(self.app.plot.values, [5.0, 6.0])
+
+    def test_metric_values_use_fixed_decimals_and_independent_fields(self) -> None:
+        self.app.wavelengths = [500.0, 890.4]
+        self.app.raw_spectrum = [12.3, 1245.5]
+        self.app.refresh_plot()
+        self.assertEqual(self.app.peak_metric_var.get(), "峰值: 1245.50")
+        self.assertEqual(self.app.position_metric_var.get(), "峰位: 890.40 nm")
+        self.assertEqual(self.app.frame_metric_var.get(), "帧率: 单帧")
+        self.assertEqual(self.app.peak_value_var.get(), "1245.50")
+        self.assertEqual(self.app.position_value_var.get(), "890.40 nm")
+        self.assertEqual(self.app.frame_value_var.get(), "单帧")
+        self.app.update_cursor_readout(890.4, 1245.5)
+        self.assertEqual(self.app.cursor_position_var.get(), "890.40")
+        self.assertEqual(self.app.cursor_var.get(), "强度: 1245.50")
 
     def test_baselines_are_invalidated_when_acquisition_context_changes(self) -> None:
         self.app.enter_simulation_mode()
@@ -526,24 +602,35 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertEqual(self.app.processing_reference_button.cget("text"), "记录 AB 参考")
         self.assertEqual(str(self.app.pl_turbo_check.cget("state")), "normal")
 
-    def test_supported_electric_dark_defaults_on_after_device_sync(self) -> None:
+    def test_device_options_match_oceanview_defaults_after_sync(self) -> None:
         self.app.sync_device_option_values(
             {
                 "electric_dark_supported": True,
                 "electric_dark": False,
-                "nonlinearity_supported": False,
-                "trigger_supported": False,
-                "light_source_supported": False,
-                "trigger_mode": 0,
+                "nonlinearity_supported": True,
+                "nonlinearity": True,
+                "trigger_supported": True,
+                "light_source_supported": True,
+                "light_source": True,
+                "trigger_mode": 1,
             }
         )
 
         self.assertTrue(self.app.electric_dark_var.get())
+        self.assertFalse(self.app.nonlinearity_var.get())
+        self.assertEqual(self.app.trigger_mode_var.get(), "按需 / 正常")
+        self.assertFalse(self.app.light_source_var.get())
         payload = self.app.acquisition_payload(
             {"integration_us": 10_000, "averages": 1, "boxcar": 0, "interval_ms": 80}
         )
         self.assertTrue(payload["electric_dark"])
         self.assertTrue(payload["apply_electric_dark"])
+        self.assertFalse(payload["nonlinearity"])
+        self.assertTrue(payload["apply_nonlinearity"])
+        self.assertEqual(payload["trigger_mode"], 0)
+        self.assertTrue(payload["apply_trigger"])
+        self.assertFalse(payload["light_source"])
+        self.assertTrue(payload["apply_light_source"])
 
         self.app.sync_device_option_values(
             {
@@ -557,6 +644,32 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         )
         self.assertFalse(self.app.electric_dark_var.get())
         self.assertEqual(str(self.app.edc_check.cget("state")), "disabled")
+
+    def test_sdk_ready_schedules_only_one_automatic_connection_attempt(self) -> None:
+        calls: list[str] = []
+        scheduled: list[tuple[int, object]] = []
+        self.app.toggle_connection = lambda: calls.append("connect")
+        original_after = self.root.after
+        self.root.after = lambda delay, callback=None, *_args: scheduled.append((delay, callback)) or "test-after"
+        try:
+            self.app.handle_sdk_ready((3, 1, 4))
+        finally:
+            self.root.after = original_after
+        auto_connect = [callback for delay, callback in scheduled if delay == 100 and callback is not None]
+        self.assertEqual(len(auto_connect), 1)
+        auto_connect[0]()
+        self.assertEqual(calls, ["connect"])
+        self.assertTrue(self.app.auto_connect_attempted)
+
+        scheduled.clear()
+        original_after = self.root.after
+        self.root.after = lambda delay, callback=None, *_args: scheduled.append((delay, callback)) or "test-after"
+        try:
+            self.app.handle_sdk_ready((3, 1, 4))
+        finally:
+            self.root.after = original_after
+        self.assertFalse(any(delay == 100 for delay, _callback in scheduled))
+        self.assertEqual(calls, ["connect"])
 
     def test_processing_uses_dark_reference_normalization_and_absorbance(self) -> None:
         self.app.enter_simulation_mode()

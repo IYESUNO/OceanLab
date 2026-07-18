@@ -40,6 +40,9 @@ class SimulatedSpectrometer:
     def disconnect(self) -> None:
         self.connected = None
 
+    def check_connection(self) -> bool:
+        return self.connected is not None
+
     def apply_configuration(self, request: AcquisitionRequest) -> SpectrumContext:
         connected = self.connect()
         self.request = request

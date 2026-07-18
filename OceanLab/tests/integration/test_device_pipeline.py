@@ -157,6 +157,19 @@ class DevicePipelineTest(unittest.TestCase):
         self.assertTrue(frame.context.light_source)
         self.assertEqual(frame.values, (10.0, 20.0, 30.0))
 
+    def test_unmodified_optional_settings_are_preserved_in_context(self) -> None:
+        device = FakeDevice()
+        device.electric_dark = True
+        device.nonlinearity = True
+        device.trigger_mode = 1
+        device.Advanced.lamp = True
+        adapter = make_adapter(device)
+        context = adapter.apply_configuration(AcquisitionRequest(250, 2, 1, 80))
+        self.assertTrue(context.electric_dark)
+        self.assertTrue(context.nonlinearity)
+        self.assertEqual(context.trigger_mode, 1)
+        self.assertTrue(context.light_source)
+
     def test_closed_sdk_cache_entry_is_removed(self) -> None:
         class FakeAPI:
             def __init__(self) -> None:
@@ -170,6 +183,43 @@ class DevicePipelineTest(unittest.TestCase):
         adapter.disconnect()
         self.assertNotIn(7, adapter.api.open_devices)
         self.assertIn(8, adapter.api.open_devices)
+
+    def test_failed_close_still_clears_adapter_state_and_cache(self) -> None:
+        class FailingAPI:
+            def __init__(self) -> None:
+                self.open_devices = {7: object()}
+
+            def close_device(self, _device_id: int) -> None:
+                raise RuntimeError("USB device already gone")
+
+        adapter = make_adapter(FakeDevice())
+        adapter.api = FailingAPI()
+        with self.assertRaisesRegex(RuntimeError, "already gone"):
+            adapter.disconnect()
+        self.assertIsNone(adapter.device)
+        self.assertIsNone(adapter.device_id)
+        self.assertIsNone(adapter.connected)
+        self.assertNotIn(7, adapter.api.open_devices)
+
+    def test_idle_connection_check_emits_disconnect_and_error(self) -> None:
+        class DisconnectedSpectrometer:
+            def disconnect(self) -> None:
+                raise RuntimeError("device vanished")
+
+            def check_connection(self) -> bool:
+                return False
+
+        events = CoalescingEventQueue()
+        service = AcquisitionService(lambda: DisconnectedSpectrometer(), events)
+        service.spectrometer = DisconnectedSpectrometer()
+        service.connected = make_adapter(FakeDevice()).connected
+        service._check_connection()
+        self.assertIsNone(service.connected)
+        kinds = []
+        while not events.empty():
+            kinds.append(events.get_nowait().kind)
+        self.assertIn("disconnected", kinds)
+        self.assertIn("error", kinds)
 
     def test_trigger_labels_match_oceandirect_values(self) -> None:
         self.assertEqual(TRIGGER_MODE_TO_VALUE["按需 / 正常"], 0)

@@ -15,6 +15,7 @@ class SpectrumPlot:
     LINE_WIDTH = 1.6
     ACTIVE_LINE_WIDTH = LINE_WIDTH * 2
     PLOT_LEFT = 108
+    Y_TITLE_X = 24
 
     def __init__(self, canvas):
         self.canvas = canvas
@@ -443,12 +444,21 @@ class SpectrumPlot:
         height = max(180, c.winfo_height())
         self._drawn_canvas_size = (max(1, c.winfo_width()), max(1, c.winfo_height()))
         c.configure(bg=self.BG)
-        left, top, right, bottom = self.PLOT_LEFT, 24, width - 22, height - 50
-        self._plot_rect = (left, top, right, bottom)
-        c.create_rectangle(left, top, right, bottom, fill=self.BG, outline=self.BORDER)
+        axis_tick_font = tkfont.Font(root=c, font=("Segoe UI", 9))
+        x_title_font = tkfont.Font(root=c, font=("Microsoft YaHei UI", 10))
+        y_title_font = tkfont.Font(root=c, font=("Microsoft YaHei UI", 10))
+        x_tick_linespace = axis_tick_font.metrics("linespace")
+        x_title_linespace = x_title_font.metrics("linespace")
+        bottom_margin = x_tick_linespace + x_title_linespace + 28
+        top, right, bottom = 24, width - 22, height - bottom_margin
+        x_tick_y = bottom + 6 + x_tick_linespace / 2
+        x_title_y = bottom + 6 + x_tick_linespace + 8 + x_title_linespace / 2
 
         xs, ys = self.visible_data()
         if not xs:
+            left = self.PLOT_LEFT
+            self._plot_rect = (left, top, right, bottom)
+            c.create_rectangle(left, top, right, bottom, fill=self.BG, outline=self.BORDER)
             c.create_text(width / 2, height / 2 - 10, text=self.empty_title, fill="#334155", font=("Microsoft YaHei UI", 16, "bold"))
             c.create_text(
                 width / 2,
@@ -477,6 +487,14 @@ class SpectrumPlot:
         else:
             ymin, ymax = data_ymin - margin, data_ymax + margin
         self._current_y_bounds = (ymin, ymax)
+        y_ticks = self.nice_ticks(ymin, ymax, 5)
+        y_tick_labels = [f"{tick:.3g}" for tick in y_ticks]
+        widest_y_tick = max((axis_tick_font.measure(label) for label in y_tick_labels), default=0)
+        y_title_right = self.Y_TITLE_X + y_title_font.metrics("linespace") / 2
+        left = max(self.PLOT_LEFT, int(y_title_right + 22 + widest_y_tick + 12))
+        left = min(left, right - 100)
+        self._plot_rect = (left, top, right, bottom)
+        c.create_rectangle(left, top, right, bottom, fill=self.BG, outline=self.BORDER)
 
         def px(x):
             return left + (x - xmin) / (xmax - xmin or 1) * (right - left)
@@ -487,12 +505,26 @@ class SpectrumPlot:
         for tick in self.nice_ticks(xmin, xmax, 7):
             x = px(tick)
             c.create_line(x, top, x, bottom, fill=self.GRID, dash=(4, 4))
-            c.create_text(x, bottom + 18, text=f"{tick:.0f}", fill=self.AXIS, font=("Segoe UI", 9))
-        for tick in self.nice_ticks(ymin, ymax, 5):
+            c.create_text(
+                x,
+                x_tick_y,
+                text=f"{tick:.0f}",
+                fill=self.AXIS,
+                font=axis_tick_font,
+                tags="x_tick_label",
+            )
+        for tick, label in zip(y_ticks, y_tick_labels):
             y = py(tick)
             c.create_line(left, y, right, y, fill=self.GRID, dash=(4, 4))
-            label = f"{tick:.3g}"
-            c.create_text(left - 9, y, text=label, fill=self.AXIS, anchor="e", font=("Segoe UI", 9))
+            c.create_text(
+                left - 12,
+                y,
+                text=label,
+                fill=self.AXIS,
+                anchor="e",
+                font=axis_tick_font,
+                tags="y_tick_label",
+            )
 
         max_points = max(300, int(right - left) * 2)
         for series_index, item in enumerate(self.series):
@@ -536,11 +568,11 @@ class SpectrumPlot:
 
         legend_items = [item for item in self.series if item.name]
         if legend_items:
-            legend_y = top + 10
-            row_height = 20
-            rows_per_column = max(1, int((bottom - top - 20) // row_height))
             normal_font = tkfont.Font(root=c, font=("Microsoft YaHei UI", 9))
             active_font = tkfont.Font(root=c, font=("Microsoft YaHei UI", 9, "bold"))
+            row_height = max(24, normal_font.metrics("linespace") + 8, active_font.metrics("linespace") + 8)
+            legend_y = top + 8
+            rows_per_column = max(1, int((bottom - legend_y - 8) // row_height))
             max_text_width = max(320, min(720, int((right - left) * 0.68) - 58))
 
             def display_name(item: PlotSeries) -> str:
@@ -571,10 +603,10 @@ class SpectrumPlot:
                 )
                 column_width = text_width + 58
                 legend_left = legend_right - column_width
-                legend_bottom = legend_y + len(column_items) * row_height + 2
+                legend_bottom = legend_y + len(column_items) * row_height + 4
                 c.create_rectangle(
                     legend_left,
-                    legend_y - 8,
+                    legend_y - 4,
                     legend_right,
                     legend_bottom,
                     fill=self.BG,
@@ -583,7 +615,7 @@ class SpectrumPlot:
                 )
                 for row, (item, label) in enumerate(zip(column_items, labels)):
                     index = column_start + row
-                    y = legend_y + row * row_height + 4
+                    y = legend_y + row * row_height + row_height / 2
                     c.create_line(
                         legend_left + 10,
                         y,
@@ -605,8 +637,23 @@ class SpectrumPlot:
                     )
                 legend_right = legend_left - 8
 
-        c.create_text((left + right) / 2, height - 15, text=self.x_label, fill=self.AXIS, font=("Microsoft YaHei UI", 10))
-        c.create_text(22, (top + bottom) / 2, text=self.y_label, fill=self.AXIS, angle=90, font=("Microsoft YaHei UI", 10))
+        c.create_text(
+            (left + right) / 2,
+            x_title_y,
+            text=self.x_label,
+            fill=self.AXIS,
+            font=x_title_font,
+            tags="x_axis_title",
+        )
+        c.create_text(
+            self.Y_TITLE_X,
+            (top + bottom) / 2,
+            text=self.y_label,
+            fill=self.AXIS,
+            angle=90,
+            font=y_title_font,
+            tags="y_axis_title",
+        )
 
         point_count = min(len(self.wavelengths), len(self.values))
         if self.cursor_index is not None and 0 <= self.cursor_index < point_count:

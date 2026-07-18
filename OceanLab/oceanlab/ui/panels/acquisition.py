@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ...config import TRIGGER_MODE_OPTIONS
+from ..widgets import LargeCheckbutton
 
 
 def build_acquisition_workspace(app, parent) -> None:
@@ -29,20 +30,20 @@ def build_acquisition_workspace(app, parent) -> None:
     app.acquisition_progress.pack(side="left", fill="x", expand=True)
     app.status_lamp = app.tk.Canvas(
         progress_row,
-        width=18,
-        height=18,
+        width=30,
+        height=26,
         background="#ffffff",
         highlightthickness=0,
     )
-    app.status_lamp.pack(side="right", padx=(9, 1))
+    app.status_lamp.pack(side="right", padx=(10, 1))
     app.status_lamp_dot = app.status_lamp.create_oval(
         3,
-        3,
-        15,
-        15,
+        1,
+        27,
+        25,
         fill="#94a3b8",
         outline="#64748b",
-        width=1,
+        width=2,
     )
 
     app.ttk.Separator(parent).pack(fill="x", pady=(0, 12))
@@ -83,6 +84,10 @@ def build_acquisition_workspace(app, parent) -> None:
     app.advanced_toggle_button.pack(fill="x")
     app.advanced_frame = app.ttk.Frame(advanced_container, style="Card.TFrame")
     app.interval_spin = app.spin_field(app.advanced_frame, "刷新间隔", app.interval_var, 5, 5000, 5, "ms")
+    app.attach_tooltip(
+        app.interval_spin,
+        "连续采集的目标刷新周期。实际帧间隔不会短于积分时间×平均次数；数值越小，界面尝试更新越快。",
+    )
     app.boxcar_spin = app.spin_field(app.advanced_frame, "滑动平均宽度", app.boxcar_var, 0, 50, 1, "像素")
 
     trigger_row = app.ttk.Frame(app.advanced_frame, style="Card.TFrame")
@@ -110,28 +115,28 @@ def build_acquisition_workspace(app, parent) -> None:
     app.x_axis_combo.pack(side="right")
     app.x_axis_combo.bind("<<ComboboxSelected>>", app.on_x_axis_changed)
 
-    app.edc_check = app.ttk.Checkbutton(
+    app.edc_check = LargeCheckbutton(
         app.advanced_frame,
         text="启用暗噪声校正",
         variable=app.electric_dark_var,
         command=app.on_setting_changed,
     )
     app.edc_check.pack(anchor="w", pady=1)
-    app.nl_check = app.ttk.Checkbutton(
+    app.nl_check = LargeCheckbutton(
         app.advanced_frame,
         text="启用非线性校正",
         variable=app.nonlinearity_var,
         command=app.on_setting_changed,
     )
     app.nl_check.pack(anchor="w", pady=1)
-    app.decouple_check = app.ttk.Checkbutton(
+    app.decouple_check = LargeCheckbutton(
         app.advanced_frame,
         text="解耦校正（当前 SDK 未开放）",
         variable=app.decouple_var,
         state="disabled",
     )
     app.decouple_check.pack(anchor="w", pady=1)
-    app.light_source_check = app.ttk.Checkbutton(
+    app.light_source_check = LargeCheckbutton(
         app.advanced_frame,
         text="启用内置光源",
         variable=app.light_source_var,

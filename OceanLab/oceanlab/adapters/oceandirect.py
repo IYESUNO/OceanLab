@@ -191,7 +191,7 @@ class OceanDirectSpectrometer:
                 if actual[name] != value:
                     raise RuntimeError(f"{name} 读回值 {actual[name]} 与请求值 {value} 不一致。")
 
-            options = self._apply_optional_configuration(request, capabilities)
+            options = self._apply_optional_configuration(request, capabilities, previous)
         except Exception:
             self._restore_configuration(previous)
             raise
@@ -227,12 +227,13 @@ class OceanDirectSpectrometer:
         self,
         request: AcquisitionRequest,
         capabilities: DeviceCapabilities,
+        previous: dict[str, Any],
     ) -> dict[str, Any]:
         actual: dict[str, Any] = {
-            "electric_dark": False,
-            "nonlinearity": False,
-            "trigger_mode": 0,
-            "light_source": False,
+            "electric_dark": bool(previous.get("electric_dark", False)),
+            "nonlinearity": bool(previous.get("nonlinearity", False)),
+            "trigger_mode": int(previous.get("trigger_mode", 0)),
+            "light_source": bool(previous.get("light_source", False)),
         }
         operations = (
             ("electric_dark", request.apply_electric_dark and capabilities.electric_dark,
@@ -284,18 +285,30 @@ class OceanDirectSpectrometer:
             raise RuntimeError("光谱包含非有限数值，已拒绝本帧数据。")
         return SpectrumFrame(values=values, timestamp=time.time(), context=context)
 
+    def check_connection(self) -> bool:
+        if self.device is None or self.connected is None:
+            return False
+        serial = str(self.device.get_serial_number())
+        return serial == self.connected.info.serial
+
     def _close_current_device(self) -> None:
         closing_id = self.device_id
-        if self.api is not None and closing_id is not None:
-            try:
+        close_error: Exception | None = None
+        try:
+            if self.api is not None and closing_id is not None:
                 self.api.close_device(closing_id)
-            finally:
+        except Exception as exc:
+            close_error = exc
+        finally:
+            if self.api is not None and closing_id is not None:
                 cached = getattr(self.api, "open_devices", None)
                 if isinstance(cached, dict):
                     cached.pop(closing_id, None)
-        self.device = None
-        self.device_id = None
-        self.connected = None
+            self.device = None
+            self.device_id = None
+            self.connected = None
+        if close_error is not None:
+            raise close_error
 
     def disconnect(self) -> None:
         self._close_current_device()
@@ -305,5 +318,7 @@ class OceanDirectSpectrometer:
             self.disconnect()
         finally:
             if self.api is not None:
-                self.api.shutdown()
-                self.api = None
+                try:
+                    self.api.shutdown()
+                finally:
+                    self.api = None

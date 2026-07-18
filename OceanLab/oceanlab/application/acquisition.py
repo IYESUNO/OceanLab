@@ -60,6 +60,7 @@ class AcquisitionService(threading.Thread):
         self.state = AcquisitionState.DISCONNECTED
         self.running = False
         self.interval_s = 0.08
+        self.connection_check_interval_s = 2.0
 
     def send(self, command: str, **payload: Any) -> None:
         self.commands.put(AcquisitionCommand(command, payload))
@@ -83,6 +84,7 @@ class AcquisitionService(threading.Thread):
             return
 
         next_acquisition = 0.0
+        next_connection_check = time.monotonic() + self.connection_check_interval_s
         while not self.stop_event.is_set():
             timeout = 0.05
             if self.running:
@@ -101,6 +103,9 @@ class AcquisitionService(threading.Thread):
                 started = time.monotonic()
                 self._acquire_frame()
                 next_acquisition = time.monotonic() + max(0.001, self.interval_s - (time.monotonic() - started))
+            elif not self.running and self.connected is not None and time.monotonic() >= next_connection_check:
+                self._check_connection()
+                next_connection_check = time.monotonic() + self.connection_check_interval_s
         self._cleanup()
 
     @staticmethod
@@ -149,12 +154,19 @@ class AcquisitionService(threading.Thread):
 
     def _disconnect(self) -> None:
         self.running = False
-        if self.spectrometer is not None:
-            self.spectrometer.disconnect()
-        self.connected = None
-        self.context = None
-        self.transition(AcquisitionState.DISCONNECTED)
-        self.emit("disconnected")
+        disconnect_error: Exception | None = None
+        try:
+            if self.spectrometer is not None:
+                self.spectrometer.disconnect()
+        except Exception as exc:
+            disconnect_error = exc
+        finally:
+            self.connected = None
+            self.context = None
+            self.transition(AcquisitionState.DISCONNECTED)
+            self.emit("disconnected")
+        if disconnect_error is not None:
+            raise disconnect_error
 
     def _request_from_payload(self, payload: dict[str, Any]) -> AcquisitionRequest:
         base = asdict(self.request) if self.request is not None else asdict(AcquisitionRequest(10_000, 1, 0, 80))
@@ -231,8 +243,28 @@ class AcquisitionService(threading.Thread):
         except Exception as exc:
             self.running = False
             self.emit("acquisition_state", running=False)
-            self._disconnect()
+            try:
+                self._disconnect()
+            except Exception:
+                pass
             self.emit("error", message=f"采集失败，仪器连接已释放：{self.describe_error(exc)}")
+
+    def _check_connection(self) -> None:
+        if self.spectrometer is None or self.connected is None:
+            return
+        checker = getattr(self.spectrometer, "check_connection", None)
+        if not callable(checker):
+            return
+        try:
+            if checker():
+                return
+            raise RuntimeError("设备未响应连接检查。")
+        except Exception as exc:
+            try:
+                self._disconnect()
+            except Exception:
+                pass
+            self.emit("error", message=f"USB 连接已断开：{self.describe_error(exc)}")
 
     def _shutdown(self) -> None:
         self.running = False
