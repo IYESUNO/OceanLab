@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 TOOLBAR_ICON_DIR = PROJECT_DIR / "assets" / "oceanview_toolbar"
 PREFERENCES_FILE = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) / "OceanLab" / "settings.json"
@@ -24,4 +24,5 @@ SAVE_FORMAT_TXT = "TXT（制表符，含表头）"
 SAVE_FORMAT_OPTIONS = (SAVE_FORMAT_CSV, SAVE_FORMAT_TXT)
 SAVE_SUFFIX_TIME = "按时间"
 SAVE_SUFFIX_SEQUENCE = "按序号"
+SAVE_SUFFIX_NONE = "无后缀"
 INTEGRATION_PRESET_NAMES = ("预设1", "预设2", "预设3")

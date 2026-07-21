@@ -4,6 +4,7 @@ import tempfile
 import time
 import tkinter as tk
 import unittest
+from unittest import mock
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +15,7 @@ from oceanlab.adapters.spectrum_files import DelimitedSpectrumImporter
 from oceanlab.adapters.oceandirect import is_oceandirect_home, normalize_sdk_home
 from oceanlab.adapters.simulation import SimulatedSpectrometer
 from oceanlab.bootstrap import service_factory
-from oceanlab.config import SAVE_FORMAT_TXT, SAVE_SUFFIX_SEQUENCE, SAVE_SUFFIX_TIME
+from oceanlab.config import SAVE_FORMAT_TXT, SAVE_SUFFIX_NONE, SAVE_SUFFIX_SEQUENCE, SAVE_SUFFIX_TIME
 from oceanlab.domain.results import PlotSeries
 from oceanlab.ui.app import OceanLabApp
 
@@ -66,8 +67,9 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertGreaterEqual(self.app.integration_unit_combo.winfo_width(), 70)
         self.assertEqual(len(self.app.integration_preset_buttons), 3)
         self.assertTrue(all(str(button.cget("state")) == "normal" for button in self.app.integration_preset_buttons))
-        self.assertTrue(all(int(button.master.cget("width")) == 42 for button in self.app.integration_preset_buttons))
-        self.assertTrue(all(int(button.master.cget("height")) == 34 for button in self.app.integration_preset_buttons))
+        self.assertTrue(all(int(button.master.cget("width")) == 56 for button in self.app.integration_preset_buttons))
+        self.assertTrue(all(int(button.master.cget("height")) == 44 for button in self.app.integration_preset_buttons))
+        self.assertIn("bold", str(self.app.preset_selector_label.cget("font")))
         self.assertEqual(
             self.app.acquisition_preset_header.winfo_rooty(),
             self.app.common_parameter_header.winfo_rooty(),
@@ -164,6 +166,28 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertEqual(self.app.simulation_settings["integration_us"], 500_000)
         self.assertEqual(self.app.simulation_settings["averages"], 9)
 
+    def test_save_verified_color_is_independent_for_each_preset(self) -> None:
+        self.app.mark_save_verified()
+        self.assertTrue(self.app.preset_save_verified[0])
+        self.assertEqual(str(self.app.save_button.cget("style")), "Saved.TButton")
+
+        self.switch_to("预设2")
+        self.assertFalse(self.app.save_verified)
+        self.assertEqual(str(self.app.save_button.cget("style")), "Primary.TButton")
+        self.app.mark_save_verified()
+        self.assertTrue(self.app.preset_save_verified[1])
+
+        self.switch_to("预设1")
+        self.assertTrue(self.app.save_verified)
+        self.assertEqual(str(self.app.save_button.cget("style")), "Saved.TButton")
+        self.app.base_name_var.set("preset-one-changed")
+        self.assertFalse(self.app.preset_save_verified[0])
+        self.assertEqual(str(self.app.save_button.cget("style")), "Primary.TButton")
+
+        self.switch_to("预设2")
+        self.assertTrue(self.app.save_verified)
+        self.assertEqual(str(self.app.save_button.cget("style")), "Saved.TButton")
+
     def test_shared_variable_name_can_be_enabled_without_losing_private_names(self) -> None:
         self.app.base_name_var.set("PresetOne")
         self.app.confirm_integration_preset_edit()
@@ -250,7 +274,7 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertNotEqual(first_candidate_id, replacement_candidate_id)
         self.assertEqual(self.app.single_capture_history[0], [])
         self.assertEqual(len(self.app.plot.series), 1)
-        self.assertTrue(self.app.plot.series[0].name.startswith("待保存｜"))
+        self.assertTrue(self.app.plot.series[0].name.startswith("待保存   ｜"))
 
         self.app.save_csv()
         self.assertNotIn(0, self.app.single_capture_candidates)
@@ -267,7 +291,8 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertEqual([item.display_name for item in history], ["1000GPa", "0750GPa", "0500GPa"])
         self.assertEqual([item.active for item in self.app.plot.series], [True, False, False])
         self.assertEqual([item.dash for item in self.app.plot.series], [None, (8, 5), (2, 5)])
-        self.assertTrue(self.app.plot.series[0].name.startswith("最新已保存｜"))
+        self.assertTrue(self.app.plot.series[0].name.startswith("最新已保存 ｜"))
+        self.assertEqual({item.name.index("｜") for item in self.app.plot.series}, {6})
         changed_context = replace(
             history[1].frame.context,
             integration_us=history[1].frame.context.integration_us * 2,
@@ -294,7 +319,7 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertEqual(self.app.raw_spectrum, [])
         self.switch_to("预设1")
         self.assertEqual(len(self.app.plot.series), 3)
-        self.assertTrue(self.app.plot.series[0].name.startswith("最新已保存｜1000GPa"))
+        self.assertTrue(self.app.plot.series[0].name.startswith("最新已保存 ｜1000GPa"))
 
     def test_integration_position_and_composed_name(self) -> None:
         self.assertEqual(self.app.name_prefix_var.get(), "")
@@ -351,21 +376,49 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         finally:
             self.app.device_info = original_device
         self.assertEqual(filename, "sample_TESTSERIAL1_21-41-02-058.txt")
+        self.assertEqual(
+            self.app.build_save_filename(
+                base_name="sample",
+                save_format=SAVE_FORMAT_TXT,
+                suffix_mode=SAVE_SUFFIX_NONE,
+            ),
+            "sample.txt",
+        )
 
     def test_save_panel_is_fixed_below_scrollable_acquisition_area(self) -> None:
         self.root.update_idletasks()
         self.assertEqual(int(self.app.sidebar_notebook.master.cget("width")), 570)
         self.assertEqual(int(self.app.cursor_shell.cget("width")), 190)
         self.assertEqual(int(self.app.cursor_shell.cget("height")), 48)
-        self.assertGreaterEqual(self.app.stop_button.winfo_width(), 92)
-        self.assertEqual(int(self.app.integration_spin.master.cget("height")), 48)
-        self.assertEqual(int(self.app.averages_spin.master.cget("height")), 48)
-        self.assertEqual(int(self.app.integration_unit_combo.master.cget("height")), 48)
+        self.assertEqual(str(self.app.start_button.cget("style")), "")
+        self.assertEqual(str(self.app.single_button.cget("style")), "Primary.TButton")
+        self.assertLess(self.app.start_button.winfo_width(), self.app.stop_button.winfo_width())
+        self.assertLess(self.app.stop_button.winfo_width(), self.app.single_button.winfo_width())
+        self.assertAlmostEqual(
+            self.app.stop_button.winfo_width() / self.app.start_button.winfo_width(),
+            2.0,
+            delta=0.15,
+        )
+        self.assertAlmostEqual(
+            self.app.single_button.winfo_width() / self.app.start_button.winfo_width(),
+            3.0,
+            delta=0.15,
+        )
+        self.assertFalse(hasattr(self.app, "apply_button"))
+        self.assertGreaterEqual(self.app.acquisition_progress.winfo_reqheight(), 16)
+        self.assertEqual(
+            int(self.app.ttk.Style().lookup("Acquisition.Horizontal.TProgressbar", "thickness")),
+            16,
+        )
+        self.assertEqual(int(self.app.integration_spin.master.cget("height")), 54)
+        self.assertEqual(int(self.app.averages_spin.master.cget("height")), 54)
+        self.assertEqual(int(self.app.integration_unit_combo.master.cget("height")), 54)
         self.assertGreaterEqual(int(self.app.status_lamp.cget("width")), 30)
         self.assertGreaterEqual(int(self.app.status_lamp.cget("height")), 26)
-        self.assertEqual(len(self.app.plot_toolbar_images), 8)
+        self.assertEqual(len(self.app.plot_toolbar_images), 9)
         self.assertTrue(all(image.width() >= 38 and image.height() >= 38 for image in self.app.plot_toolbar_images))
-        self.assertEqual(len(self.app.plot_toolbar.winfo_children()), 8)
+        self.assertEqual(len(self.app.plot_toolbar.winfo_children()), 9)
+        self.assertIn("crosshair", self.app.plot_tool_buttons)
         self.assertEqual(int(self.app.peak_metric_label.cget("width")), 8)
         self.assertEqual(int(self.app.position_metric_label.cget("width")), 10)
         self.assertEqual(int(self.app.frame_metric_label.cget("width")), 9)
@@ -396,6 +449,29 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertEqual(self.app.sidebar_save_panel.winfo_height(), panel_height)
         expanded_notebook_bottom = self.app.sidebar_notebook.winfo_rooty() + self.app.sidebar_notebook.winfo_height()
         self.assertGreaterEqual(self.app.sidebar_save_panel.winfo_rooty() + 2, expanded_notebook_bottom)
+
+    def test_successful_single_capture_leaves_progress_green(self) -> None:
+        self.app.single_in_progress = True
+        self.app.single_started_at = time.monotonic()
+        self.app.finish_single_acquisition(success=True)
+        self.root.update_idletasks()
+
+        self.assertEqual(self.app.single_progress_var.get(), 100.0)
+        self.assertEqual(
+            str(self.app.acquisition_progress.cget("style")),
+            "AcquisitionComplete.Horizontal.TProgressbar",
+        )
+        self.assertEqual(
+            self.app.ttk.Style().lookup(
+                "AcquisitionComplete.Horizontal.TProgressbar",
+                "background",
+            ),
+            "#198754",
+        )
+        self.assertEqual(
+            self.app.status_lamp.itemcget(self.app.status_lamp_dot, "fill"),
+            "#198754",
+        )
 
     def test_save_preview_wraps_full_source_style_filename(self) -> None:
         self.app.enter_simulation_mode()
@@ -442,10 +518,7 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.app.open_save_settings()
         self.root.update_idletasks()
         try:
-            self.assertEqual(
-                int(self.app.save_sequence_digits_shell.cget("height")),
-                int(self.app.integration_spin.master.cget("height")),
-            )
+            self.assertEqual(int(self.app.save_sequence_digits_shell.cget("height")), 48)
             self.assertEqual(self.app.save_sequence_digits_up_button.cget("text"), "▲")
             self.assertEqual(self.app.save_sequence_digits_down_button.cget("text"), "▼")
             self.assertEqual(str(self.app.save_sequence_digits_entry.cget("state")), "normal")
@@ -453,6 +526,32 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
             self.assertEqual(self.app.save_sequence_digits_entry.get(), "6")
             self.app.save_sequence_digits_down_button.invoke()
             self.assertEqual(self.app.save_sequence_digits_entry.get(), "5")
+        finally:
+            self.app.save_dialog.destroy()
+            self.app.save_dialog = None
+
+    def test_save_suffix_none_uses_large_radio_and_plain_filename(self) -> None:
+        self.app.save_format_var.set(SAVE_FORMAT_TXT)
+        self.app.open_save_settings()
+        self.root.update_idletasks()
+        try:
+            radios = (
+                self.app.save_suffix_time_radio,
+                self.app.save_suffix_sequence_radio,
+                self.app.save_suffix_none_radio,
+            )
+            self.assertTrue(all(radio.box.winfo_reqwidth() >= 32 for radio in radios))
+            self.assertTrue(all(radio.box.winfo_reqheight() >= 32 for radio in radios))
+            self.app.save_suffix_none_radio.invoke()
+            self.root.update_idletasks()
+            variable_name = self.app.save_preview_label.cget("textvariable")
+            preview = self.root.getvar(variable_name)
+            self.assertEqual(preview, f"{self.app.compose_save_base_name()}.txt")
+            self.assertEqual(str(self.app.save_sequence_digits_entry.cget("state")), "disabled")
+            self.assertEqual(
+                self.app.save_suffix_none_radio.box.itemcget(self.app.save_suffix_none_radio.box_dot, "state"),
+                "normal",
+            )
         finally:
             self.app.save_dialog.destroy()
             self.app.save_dialog = None
@@ -547,6 +646,19 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         first_legend_box = self.app.plot.canvas.bbox("legend_text_0")
         second_legend_box = self.app.plot.canvas.bbox("legend_text_1")
         self.assertLess(first_legend_box[3], second_legend_box[1])
+        long_name = "最新已保存 ｜" + "very-long-sample-name-" * 40
+        self.app.plot.set_series(
+            [PlotSeries(long_name, (390.0, 420.0), (3.0, 4.0), "#0f6cbd", active=True)],
+            "强度 (counts)",
+        )
+        self.app.plot.draw()
+        truncated_legend = self.app.plot.canvas.itemcget(
+            self.app.plot.canvas.find_withtag("legend_text_0")[0],
+            "text",
+        )
+        self.assertTrue(truncated_legend.startswith("最新已保存 ｜"))
+        self.assertTrue(truncated_legend.endswith("…"))
+        self.assertNotIn("…sample-name", truncated_legend)
         y_title_box = self.app.plot.canvas.bbox("y_axis_title")
         y_tick_box = self.app.plot.canvas.bbox("y_tick_label")
         self.assertLess(y_title_box[2] + 10, y_tick_box[0])
@@ -570,6 +682,81 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.app.update_cursor_readout(890.4, 1245.5)
         self.assertEqual(self.app.cursor_position_var.get(), "890.40")
         self.assertEqual(self.app.cursor_var.get(), "强度: 1245.50")
+
+    def test_crosshair_tool_places_and_drags_free_xy_marker(self) -> None:
+        self.assertEqual(self.app.current_workspace(), "采集")
+        self.assertFalse(self.app.plot.crosshair_drag_preview_enabled)
+        self.app.plot.set_data([400.0, 500.0, 600.0], [10.0, 50.0, 20.0], "强度 (counts)")
+        self.app.plot.set_cursor_index(1)
+        self.app.plot.draw()
+        self.assertTrue(self.app.plot.canvas.find_withtag("data_cursor"))
+        self.app.toggle_plot_mode("crosshair")
+        self.assertEqual(self.app.plot.interaction_mode, "crosshair")
+        self.assertFalse(self.app.plot.canvas.find_withtag("data_cursor"))
+        self.assertEqual(self.app.cursor_tool_name_var.get(), "十字架")
+        self.assertEqual(self.app.cursor_axis_name_var.get(), "X")
+        self.assertEqual(self.app.cursor_unit_var.get(), "nm")
+        left, top, right, bottom = self.app.plot._plot_rect
+        press = SimpleNamespace(x=(left + right) / 2, y=(top + bottom) / 2)
+        self.app.plot.on_press(press)
+        self.assertIsNotNone(self.app.plot.crosshair_position)
+        self.assertEqual(len(self.app.plot.canvas.find_withtag("plot_crosshair")), 3)
+        self.assertAlmostEqual(self.app.plot.canvas.coords("crosshair_vertical")[1], top)
+        self.assertAlmostEqual(self.app.plot.canvas.coords("crosshair_vertical")[3], bottom)
+        self.assertEqual(self.app.cursor_position_var.get(), "500.00")
+        self.assertTrue(self.app.cursor_var.get().startswith("Y: "))
+
+        drag = SimpleNamespace(x=left + (right - left) * 0.75, y=top + (bottom - top) * 0.25)
+        with mock.patch.object(self.app.plot, "draw", wraps=self.app.plot.draw) as draw_mock:
+            self.app.plot.on_drag(drag)
+            self.app.plot.on_release(drag)
+            draw_mock.assert_not_called()
+        x_value, y_value = self.app.plot.crosshair_position
+        self.assertAlmostEqual(x_value, 550.0, places=2)
+        ylo, yhi = self.app.plot._current_y_bounds
+        self.assertAlmostEqual(y_value, yhi - 0.25 * (yhi - ylo), places=2)
+        self.assertEqual(self.app.cursor_position_var.get(), "550.00")
+
+        self.app.toggle_plot_mode("crosshair")
+        self.assertEqual(self.app.plot.interaction_mode, "normal")
+        self.assertEqual(self.app.cursor_tool_name_var.get(), "数据游标")
+        self.assertFalse(self.app.plot.canvas.find_withtag("plot_crosshair"))
+        self.assertTrue(self.app.plot.canvas.find_withtag("data_cursor"))
+
+        cursor_press = SimpleNamespace(x=left + (right - left) * 0.3, y=(top + bottom) / 2)
+        cursor_drag = SimpleNamespace(x=left + (right - left) * 0.6, y=(top + bottom) / 2)
+        with mock.patch.object(self.app.plot, "draw", wraps=self.app.plot.draw) as draw_mock:
+            self.app.plot.on_press(cursor_press)
+            self.app.plot.on_drag(cursor_drag)
+            cursor_coords = self.app.plot.canvas.coords("data_cursor")
+            self.assertAlmostEqual(cursor_coords[1], top)
+            self.assertAlmostEqual(cursor_coords[3], bottom)
+            self.app.plot.on_release(cursor_drag)
+            draw_mock.assert_not_called()
+
+        self.select_workspace("PL荧光")
+        self.assertTrue(self.app.plot.crosshair_drag_preview_enabled)
+
+    def test_plot_peak_downsampling_preserves_spikes_and_selection_drag_is_incremental(self) -> None:
+        points = [(float(index), 1.0) for index in range(4000)]
+        points[1777] = (1777.0, 9000.0)
+        reduced = self.app.plot.peak_downsample(points, 600)
+        self.assertLessEqual(len(reduced), 602)
+        self.assertIn((1777.0, 9000.0), reduced)
+        self.assertEqual(reduced[0], points[0])
+        self.assertEqual(reduced[-1], points[-1])
+
+        self.app.plot.set_data([float(index) for index in range(4000)], [1.0] * 4000, "强度 (counts)")
+        self.app.plot.draw()
+        self.app.plot.set_interaction_mode("select")
+        left, top, right, bottom = self.app.plot._plot_rect
+        press = SimpleNamespace(x=left + 20, y=top + 20)
+        drag = SimpleNamespace(x=right - 20, y=bottom - 20)
+        self.app.plot.on_press(press)
+        with mock.patch.object(self.app.plot, "draw", wraps=self.app.plot.draw) as draw_mock:
+            self.app.plot.on_drag(drag)
+            draw_mock.assert_not_called()
+        self.assertTrue(self.app.plot.canvas.find_withtag("zoom_selection"))
 
     def test_baselines_are_invalidated_when_acquisition_context_changes(self) -> None:
         self.app.enter_simulation_mode()

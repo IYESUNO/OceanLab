@@ -150,3 +150,148 @@ class LargeCheckbutton(tk.Frame):
         except (tk.TclError, AttributeError):
             pass
         super().destroy()
+
+
+class LargeRadiobutton(tk.Frame):
+    """A DPI-stable radiobutton with a large, easy-to-click indicator."""
+
+    BOX_SIZE = 32
+
+    def __init__(
+        self,
+        master,
+        *,
+        text: str,
+        variable,
+        value: str,
+        command: Callable[[], None] | None = None,
+        state: str = "normal",
+        background: str = "#ffffff",
+    ) -> None:
+        super().__init__(
+            master,
+            background=background,
+            cursor="hand2",
+            padx=2,
+            pady=1,
+            takefocus=True,
+        )
+        self._text = text
+        self._variable = variable
+        self._value = value
+        self._command = command
+        self._state = state
+
+        self.box = tk.Canvas(
+            self,
+            width=self.BOX_SIZE,
+            height=self.BOX_SIZE,
+            background=background,
+            highlightthickness=0,
+            borderwidth=0,
+            cursor="hand2",
+        )
+        self.box.pack(side="left")
+        self.box_outline = self.box.create_oval(
+            4,
+            4,
+            28,
+            28,
+            fill="#ffffff",
+            outline="#64748b",
+            width=2,
+        )
+        self.box_dot = self.box.create_oval(
+            10,
+            10,
+            22,
+            22,
+            fill="#0f6cbd",
+            outline="",
+        )
+        self.text_label = tk.Label(
+            self,
+            text=text,
+            font=("Microsoft YaHei UI", 10),
+            background=background,
+            foreground="#172033",
+            cursor="hand2",
+            padx=2,
+        )
+        self.text_label.pack(side="left")
+
+        for widget in (self, self.box, self.text_label):
+            widget.bind("<Button-1>", self._on_click)
+        self.bind("<space>", self._on_click)
+        self.bind("<Return>", self._on_click)
+        self._trace_name = self._variable.trace_add("write", self._on_variable_changed)
+        self.render()
+
+    def _on_click(self, _event=None):
+        if self._state == "disabled":
+            return "break"
+        changed = self._variable.get() != self._value
+        self._variable.set(self._value)
+        if changed and self._command is not None:
+            self._command()
+        return "break"
+
+    def _on_variable_changed(self, *_args) -> None:
+        self.render()
+
+    def invoke(self) -> None:
+        self._on_click()
+
+    def render(self) -> None:
+        selected = self._variable.get() == self._value
+        disabled = self._state == "disabled"
+        outline = "#cbd5e1" if disabled else "#0f6cbd" if selected else "#64748b"
+        foreground = "#94a3b8" if disabled else "#172033"
+        cursor = "" if disabled else "hand2"
+        self.box.itemconfigure(
+            self.box_outline,
+            outline=outline,
+            fill="#f3f4f6" if disabled else "#ffffff",
+        )
+        self.box.itemconfigure(
+            self.box_dot,
+            state="normal" if selected else "hidden",
+            fill="#94a3b8" if disabled else "#0f6cbd",
+        )
+        super().configure(cursor=cursor)
+        self.box.configure(cursor=cursor)
+        self.text_label.configure(cursor=cursor, foreground=foreground)
+
+    def configure(self, cnf=None, **kwargs):
+        if cnf:
+            kwargs.update(cnf)
+        if "state" in kwargs:
+            state = str(kwargs.pop("state"))
+            if state not in {"normal", "disabled"}:
+                raise tk.TclError(f'bad state "{state}": must be normal or disabled')
+            self._state = state
+        if "text" in kwargs:
+            self._text = str(kwargs.pop("text"))
+            self.text_label.configure(text=self._text)
+        result = super().configure(**kwargs)
+        if hasattr(self, "box"):
+            self.render()
+        return result
+
+    config = configure
+
+    def cget(self, key):
+        if key == "state":
+            return self._state
+        if key == "text":
+            return self._text
+        if key == "value":
+            return self._value
+        return super().cget(key)
+
+    def destroy(self) -> None:
+        try:
+            self._variable.trace_remove("write", self._trace_name)
+        except (tk.TclError, AttributeError):
+            pass
+        super().destroy()

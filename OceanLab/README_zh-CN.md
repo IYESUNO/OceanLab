@@ -1,6 +1,6 @@
 # OceanLab 光谱采集软件
 
-OceanLab 1.0.0 是面向 Windows 10/11 的轻量级光谱采集与分析软件，支持模拟模式、OceanDirect 真机采集、实时处理、PL 荧光叠图和 AB 吸收分析。
+OceanLab 1.0.1 是面向 Windows 10/11 的轻量级光谱采集与分析软件，支持模拟模式、OceanDirect 真机采集、实时处理、PL 荧光叠图和 AB 吸收分析。
 
 ## 快速开始
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_left, bisect_right
 from tkinter import font as tkfont
 
 from ..domain.results import PlotSeries
@@ -34,6 +35,11 @@ class SpectrumPlot:
         self.cursor_callback = None
         self.cursor_index: int | None = None
         self._cursor_dragging = False
+        self.crosshair_callback = None
+        self.crosshair_position: tuple[float, float] | None = None
+        self._crosshair_dragging = False
+        self._overlay_drag_preview = False
+        self.crosshair_drag_preview_enabled = True
         self.limit_callback = None
         self._plot_rect: tuple[float, float, float, float] | None = None
         self._current_y_bounds: tuple[float, float] | None = None
@@ -49,6 +55,11 @@ class SpectrumPlot:
         self._pending_canvas_size: tuple[int, int] | None = None
         self._resize_draw_after_id: str | None = None
         self._interaction_draw_after_id: str | None = None
+        self._axis_tick_font = tkfont.Font(root=canvas, font=("Segoe UI", 9))
+        self._x_title_font = tkfont.Font(root=canvas, font=("Microsoft YaHei UI", 10))
+        self._y_title_font = tkfont.Font(root=canvas, font=("Microsoft YaHei UI", 10))
+        self._legend_font = tkfont.Font(root=canvas, font=("Microsoft YaHei UI", 9))
+        self._legend_active_font = tkfont.Font(root=canvas, font=("Microsoft YaHei UI", 9, "bold"))
         canvas.configure(cursor="arrow")
         canvas.bind("<Configure>", self.on_canvas_configure)
         canvas.bind("<Motion>", self.on_motion)
@@ -250,16 +261,22 @@ class SpectrumPlot:
         if bounds is None:
             return [], []
         lo, hi = bounds
-        pairs = [
-            (x, y)
-            for item in self.series
-            for x, y in zip(item.wavelengths, item.values)
-            if lo <= x <= hi and math.isfinite(y)
-        ]
+        pairs = [point for item in self.series for point in self.visible_series_points(item, lo, hi)]
         if not pairs:
             return [], []
         xs, ys = zip(*pairs)
         return list(xs), list(ys)
+
+    @staticmethod
+    def visible_series_points(item: PlotSeries, xmin: float, xmax: float) -> list[tuple[float, float]]:
+        """Clip a monotonic spectrum by binary search before doing per-point work."""
+        start = bisect_left(item.wavelengths, xmin)
+        end = bisect_right(item.wavelengths, xmax)
+        return [
+            (x, y)
+            for x, y in zip(item.wavelengths[start:end], item.values[start:end])
+            if math.isfinite(y)
+        ]
 
     def set_cursor_index(self, index: int, redraw: bool = True) -> bool:
         point_count = min(len(self.wavelengths), len(self.values))
@@ -290,6 +307,100 @@ class SpectrumPlot:
         value = lo + (pixel_x - left) / max(1.0, right - left) * (hi - lo)
         return self.set_cursor_nearest_x(value, redraw=redraw)
 
+    def set_crosshair_from_pixel(self, pixel_x: float, pixel_y: float, redraw: bool = True) -> bool:
+        if self._plot_rect is None:
+            return False
+        left, top, right, bottom = self._plot_rect
+        pixel_x = min(right, max(left, pixel_x))
+        pixel_y = min(bottom, max(top, pixel_y))
+        point = self.data_at_pixel(pixel_x, pixel_y)
+        if point is None:
+            return False
+        self.crosshair_position = point
+        if redraw:
+            self.draw()
+        return True
+
+    def update_cursor_overlay(self) -> None:
+        """Move only the data-cursor item; do not rebuild curves, axes, or legend."""
+        point_count = min(len(self.wavelengths), len(self.values))
+        if (
+            self.interaction_mode == "crosshair"
+            or self.cursor_index is None
+            or not 0 <= self.cursor_index < point_count
+            or self._plot_rect is None
+        ):
+            self.canvas.delete("data_cursor")
+            return
+        bounds = self.current_x_bounds()
+        if bounds is None:
+            self.canvas.delete("data_cursor")
+            return
+        left, top, right, bottom = self._plot_rect
+        xmin, xmax = bounds
+        cursor_x_value = self.wavelengths[self.cursor_index]
+        cursor_y_value = self.values[self.cursor_index]
+        if xmin <= cursor_x_value <= xmax:
+            x = left + (cursor_x_value - xmin) / (xmax - xmin or 1.0) * (right - left)
+            if self.canvas.find_withtag("data_cursor"):
+                self.canvas.coords("data_cursor", x, top, x, bottom)
+            else:
+                self.canvas.create_line(
+                    x, top, x, bottom, fill=self.CURSOR, width=1.5, tags="data_cursor"
+                )
+        else:
+            self.canvas.delete("data_cursor")
+        if self.cursor_callback:
+            self.cursor_callback(cursor_x_value, cursor_y_value)
+
+    def update_crosshair_overlay(self) -> None:
+        """Move only the three crosshair items for low-latency PL interaction."""
+        if (
+            self.interaction_mode != "crosshair"
+            or self.crosshair_position is None
+            or self._plot_rect is None
+            or self._current_y_bounds is None
+        ):
+            self.canvas.delete("plot_crosshair")
+            return
+        bounds = self.current_x_bounds()
+        if bounds is None:
+            self.canvas.delete("plot_crosshair")
+            return
+        left, top, right, bottom = self._plot_rect
+        xmin, xmax = bounds
+        ymin, ymax = self._current_y_bounds
+        x_value, y_value = self.crosshair_position
+        if xmin <= x_value <= xmax and ymin <= y_value <= ymax:
+            x = left + (x_value - xmin) / (xmax - xmin or 1.0) * (right - left)
+            y = bottom - (y_value - ymin) / (ymax - ymin or 1.0) * (bottom - top)
+            vertical = (x, top, x, bottom)
+            horizontal = (left, y, right, y)
+            if self._overlay_drag_preview:
+                vertical = (x, max(top, y - 22), x, min(bottom, y + 22))
+                horizontal = (max(left, x - 22), y, min(right, x + 22), y)
+            if self.canvas.find_withtag("crosshair_vertical"):
+                self.canvas.coords("crosshair_vertical", *vertical)
+                self.canvas.coords("crosshair_horizontal", *horizontal)
+                self.canvas.coords("crosshair_center", x - 4, y - 4, x + 4, y + 4)
+            else:
+                self.canvas.create_line(
+                    *vertical, fill=self.CURSOR, width=1.5,
+                    tags=("plot_crosshair", "crosshair_vertical"),
+                )
+                self.canvas.create_line(
+                    *horizontal, fill=self.CURSOR, width=1.5,
+                    tags=("plot_crosshair", "crosshair_horizontal"),
+                )
+                self.canvas.create_oval(
+                    x - 4, y - 4, x + 4, y + 4, outline=self.CURSOR, width=1.5,
+                    tags=("plot_crosshair", "crosshair_center"),
+                )
+        else:
+            self.canvas.delete("plot_crosshair")
+        if self.crosshair_callback:
+            self.crosshair_callback(x_value, y_value)
+
     def step_cursor(self, direction: int) -> bool:
         point_count = min(len(self.wavelengths), len(self.values))
         if point_count == 0:
@@ -302,6 +413,26 @@ class SpectrumPlot:
         changed = target != self.cursor_index
         self.set_cursor_index(target)
         return changed
+
+    @staticmethod
+    def peak_downsample(
+        points: list[tuple[float, float]], max_points: int
+    ) -> list[tuple[float, float]]:
+        """Reduce dense lines while retaining each bucket's minimum and maximum."""
+        if len(points) <= max_points or max_points < 4:
+            return points
+        interior = points[1:-1]
+        bucket_count = max(1, (max_points - 2) // 2)
+        bucket_size = max(1, math.ceil(len(interior) / bucket_count))
+        reduced = [points[0]]
+        for start in range(0, len(interior), bucket_size):
+            bucket = interior[start : start + bucket_size]
+            low_index = min(range(len(bucket)), key=lambda index: bucket[index][1])
+            high_index = max(range(len(bucket)), key=lambda index: bucket[index][1])
+            for index in sorted({low_index, high_index}):
+                reduced.append(bucket[index])
+        reduced.append(points[-1])
+        return reduced
 
     def reset_view(self) -> None:
         """Restore the maximum meaningful view, equivalent to OceanView ZoomOutMax."""
@@ -329,7 +460,7 @@ class SpectrumPlot:
         self.draw()
 
     def set_interaction_mode(self, mode: str) -> None:
-        if mode not in {"normal", "zoom_in", "zoom_out", "select", "drag"}:
+        if mode not in {"normal", "zoom_in", "zoom_out", "select", "drag", "crosshair"}:
             raise ValueError(f"Unsupported plot interaction mode: {mode}")
         self.interaction_mode = mode
         self._drag_start_x = None
@@ -338,6 +469,8 @@ class SpectrumPlot:
         self._drag_start_y_bounds = None
         self._selection_start = None
         self._cursor_dragging = False
+        self._crosshair_dragging = False
+        self._overlay_drag_preview = False
         self._dragging = False
         cursor = "fleur" if mode == "drag" else "crosshair" if mode != "normal" else "arrow"
         self.canvas.configure(cursor=cursor)
@@ -444,9 +577,9 @@ class SpectrumPlot:
         height = max(180, c.winfo_height())
         self._drawn_canvas_size = (max(1, c.winfo_width()), max(1, c.winfo_height()))
         c.configure(bg=self.BG)
-        axis_tick_font = tkfont.Font(root=c, font=("Segoe UI", 9))
-        x_title_font = tkfont.Font(root=c, font=("Microsoft YaHei UI", 10))
-        y_title_font = tkfont.Font(root=c, font=("Microsoft YaHei UI", 10))
+        axis_tick_font = self._axis_tick_font
+        x_title_font = self._x_title_font
+        y_title_font = self._y_title_font
         x_tick_linespace = axis_tick_font.metrics("linespace")
         x_title_linespace = x_title_font.metrics("linespace")
         bottom_margin = x_tick_linespace + x_title_linespace + 28
@@ -526,15 +659,11 @@ class SpectrumPlot:
                 tags="y_tick_label",
             )
 
-        max_points = max(300, int(right - left) * 2)
+        max_points = max(300, int(right - left) // 2)
         for series_index, item in enumerate(self.series):
-            visible = [
-                (x, y)
-                for x, y in zip(item.wavelengths, item.values)
-                if xmin <= x <= xmax and math.isfinite(y)
-            ]
-            stride = max(1, len(visible) // max_points)
-            points = [(px(x), py(y)) for x, y in visible[::stride]]
+            visible = self.visible_series_points(item, xmin, xmax)
+            visible = self.peak_downsample(visible, max_points)
+            points = [(px(x), py(y)) for x, y in visible]
             paths: list[list[float]] = []
             current_path: list[float] = []
             for (x1, y1), (x2, y2) in zip(points, points[1:]):
@@ -568,8 +697,8 @@ class SpectrumPlot:
 
         legend_items = [item for item in self.series if item.name]
         if legend_items:
-            normal_font = tkfont.Font(root=c, font=("Microsoft YaHei UI", 9))
-            active_font = tkfont.Font(root=c, font=("Microsoft YaHei UI", 9, "bold"))
+            normal_font = self._legend_font
+            active_font = self._legend_active_font
             row_height = max(24, normal_font.metrics("linespace") + 8, active_font.metrics("linespace") + 8)
             legend_y = top + 8
             rows_per_column = max(1, int((bottom - legend_y - 8) // row_height))
@@ -583,9 +712,7 @@ class SpectrumPlot:
                 best = "…"
                 while low <= high:
                     keep = (low + high) // 2
-                    left_keep = (keep + 1) // 2
-                    right_keep = keep // 2
-                    candidate = item.name[:left_keep] + "…" + (item.name[-right_keep:] if right_keep else "")
+                    candidate = item.name[:keep] + "…"
                     if font.measure(candidate) <= max_text_width:
                         best = candidate
                         low = keep + 1
@@ -655,15 +782,8 @@ class SpectrumPlot:
             tags="y_axis_title",
         )
 
-        point_count = min(len(self.wavelengths), len(self.values))
-        if self.cursor_index is not None and 0 <= self.cursor_index < point_count:
-            cursor_x_value = self.wavelengths[self.cursor_index]
-            cursor_y_value = self.values[self.cursor_index]
-            if xmin <= cursor_x_value <= xmax:
-                x = px(cursor_x_value)
-                c.create_line(x, top, x, bottom, fill=self.CURSOR, width=1.5, tags="data_cursor")
-            if self.cursor_callback:
-                self.cursor_callback(cursor_x_value, cursor_y_value)
+        self.update_cursor_overlay()
+        self.update_crosshair_overlay()
 
     def on_motion(self, event) -> None:
         return
@@ -706,7 +826,14 @@ class SpectrumPlot:
             if self.interaction_mode == "normal":
                 self._cursor_dragging = True
                 self.canvas.configure(cursor="sb_h_double_arrow")
-                self.set_cursor_from_pixel(event.x)
+                self.set_cursor_from_pixel(event.x, redraw=False)
+                self.update_cursor_overlay()
+                return
+            if self.interaction_mode == "crosshair":
+                self._crosshair_dragging = True
+                self._overlay_drag_preview = self.crosshair_drag_preview_enabled
+                self.set_crosshair_from_pixel(event.x, event.y, redraw=False)
+                self.update_crosshair_overlay()
                 return
             point = self.data_at_pixel(event.x, event.y)
             if point is None:
@@ -718,6 +845,18 @@ class SpectrumPlot:
                 return
             if self.interaction_mode == "select":
                 self._selection_start = (event.x, event.y)
+                self.canvas.delete("zoom_selection")
+                self.canvas.create_rectangle(
+                    event.x,
+                    event.y,
+                    event.x,
+                    event.y,
+                    outline=self.CURSOR,
+                    width=2,
+                    dash=(5, 3),
+                    fill="",
+                    tags="zoom_selection",
+                )
                 return
             self._drag_start_x = event.x
             self._drag_start_y = event.y
@@ -731,25 +870,18 @@ class SpectrumPlot:
         left, top, right, bottom = self._plot_rect
         if self.interaction_mode == "normal" and self._cursor_dragging:
             self.set_cursor_from_pixel(event.x, redraw=False)
-            self.request_interaction_draw()
+            self.update_cursor_overlay()
+            return
+        if self.interaction_mode == "crosshair" and self._crosshair_dragging:
+            self.set_crosshair_from_pixel(event.x, event.y, redraw=False)
+            self.update_crosshair_overlay()
             return
         if self.interaction_mode == "select" and self._selection_start is not None:
             start_x, start_y = self._selection_start
             end_x = min(right, max(left, event.x))
             end_y = min(bottom, max(top, event.y))
             self._dragging = abs(end_x - start_x) > 3 or abs(end_y - start_y) > 3
-            self.draw()
-            self.canvas.create_rectangle(
-                start_x,
-                start_y,
-                end_x,
-                end_y,
-                outline=self.CURSOR,
-                width=2,
-                dash=(5, 3),
-                fill="",
-                tags="zoom_selection",
-            )
+            self.canvas.coords("zoom_selection", start_x, start_y, end_x, end_y)
             return
         if (
             self.interaction_mode != "drag"
@@ -771,9 +903,18 @@ class SpectrumPlot:
 
     def on_release(self, event) -> None:
         if self.interaction_mode == "normal" and self._cursor_dragging:
-            self.set_cursor_from_pixel(event.x)
+            self.set_cursor_from_pixel(event.x, redraw=False)
+            self._overlay_drag_preview = False
+            self.update_cursor_overlay()
             self._cursor_dragging = False
             self.canvas.configure(cursor="arrow")
+            return
+        if self.interaction_mode == "crosshair" and self._crosshair_dragging:
+            self.set_crosshair_from_pixel(event.x, event.y, redraw=False)
+            self._overlay_drag_preview = False
+            self.update_crosshair_overlay()
+            self._crosshair_dragging = False
+            self.canvas.configure(cursor="crosshair")
             return
         was_dragging = self._dragging
         if self.interaction_mode == "select" and self._selection_start is not None and self._plot_rect is not None:

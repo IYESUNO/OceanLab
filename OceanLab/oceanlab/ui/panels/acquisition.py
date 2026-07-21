@@ -8,11 +8,16 @@ def build_acquisition_workspace(app, parent) -> None:
     app.ttk.Label(parent, text="运行控制", style="Section.TLabel").pack(anchor="w", pady=(0, 8))
     run_row = app.ttk.Frame(parent, style="Card.TFrame")
     run_row.pack(fill="x")
-    for column in range(3):
-        run_row.columnconfigure(column, weight=1, minsize=92, uniform="run")
-    app.start_button = app.ttk.Button(run_row, text="开始", style="Primary.TButton", command=app.start_acquisition)
+    for column, weight in enumerate((1, 3, 2)):
+        run_row.columnconfigure(column, weight=weight, uniform="run")
+    app.start_button = app.ttk.Button(run_row, text="开始", command=app.start_acquisition)
     app.start_button.grid(row=0, column=0, sticky="ew")
-    app.single_button = app.ttk.Button(run_row, text="单次", command=app.single_acquisition)
+    app.single_button = app.ttk.Button(
+        run_row,
+        text="单次",
+        style="Primary.TButton",
+        command=app.single_acquisition,
+    )
     app.single_button.grid(row=0, column=1, sticky="ew", padx=6)
     app.stop_button = app.ttk.Button(run_row, text="暂停", style="Stop.TButton", command=app.stop_acquisition)
     app.stop_button.grid(row=0, column=2, sticky="ew")
@@ -149,9 +154,3 @@ def build_acquisition_workspace(app, parent) -> None:
         style="Hint.TLabel",
         wraplength=500,
     ).pack(anchor="w", pady=(5, 0))
-
-    app.apply_button = app.ttk.Button(parent, text="应用采集参数", style="Primary.TButton", command=app.apply_settings)
-    app.apply_button.pack(fill="x")
-    app.ttk.Label(parent, textvariable=app.settings_state_var, style="Hint.TLabel", wraplength=500).pack(
-        anchor="w", pady=(7, 0)
-    )

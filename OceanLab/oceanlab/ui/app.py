@@ -19,6 +19,7 @@ from ..config import (
     SAVE_FORMAT_CSV,
     SAVE_FORMAT_OPTIONS,
     SAVE_FORMAT_TXT,
+    SAVE_SUFFIX_NONE,
     SAVE_SUFFIX_SEQUENCE,
     SAVE_SUFFIX_TIME,
     SIMULATION_SETTINGS,
@@ -55,7 +56,7 @@ from .panels import (
     build_processing_workspace,
 )
 from .dialogs import center_dialog, close_modal
-from .widgets import LargeCheckbutton
+from .widgets import LargeCheckbutton, LargeRadiobutton
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,9 @@ class OceanLabApp:
             "light_source": False,
         }
         self.save_dialog = None
+        self.preset_save_verified = {
+            index: False for index in range(len(INTEGRATION_PRESET_NAMES))
+        }
         self.save_verified = False
         self.pl_row_variables: dict[str, dict[str, Any]] = {}
         self.ab_row_variables: dict[str, dict[str, Any]] = {}
@@ -155,7 +159,7 @@ class OceanLabApp:
         if save_format not in SAVE_FORMAT_OPTIONS:
             save_format = SAVE_FORMAT_CSV
         suffix_mode = preferences.get("suffix_mode", SAVE_SUFFIX_TIME)
-        if suffix_mode not in (SAVE_SUFFIX_TIME, SAVE_SUFFIX_SEQUENCE):
+        if suffix_mode not in (SAVE_SUFFIX_TIME, SAVE_SUFFIX_SEQUENCE, SAVE_SUFFIX_NONE):
             suffix_mode = SAVE_SUFFIX_TIME
         try:
             self.save_sequence = max(1, int(preferences.get("sequence", 1)))
@@ -230,7 +234,7 @@ class OceanLabApp:
                 if preset_format not in SAVE_FORMAT_OPTIONS:
                     preset_format = save_format
                 preset_suffix = str(item.get("suffix_mode", suffix_mode))
-                if preset_suffix not in (SAVE_SUFFIX_TIME, SAVE_SUFFIX_SEQUENCE):
+                if preset_suffix not in (SAVE_SUFFIX_TIME, SAVE_SUFFIX_SEQUENCE, SAVE_SUFFIX_NONE):
                     preset_suffix = suffix_mode
                 acquisition_presets.append(
                     {
@@ -320,6 +324,7 @@ class OceanLabApp:
         self.single_history_warning_var = tk.StringVar(value="")
         self.cursor_var = tk.StringVar(value="光标: —")
         self.cursor_position_var = tk.StringVar(value="")
+        self.cursor_tool_name_var = tk.StringVar(value="数据游标")
         self.cursor_axis_name_var = tk.StringVar(value="波长")
         self.cursor_unit_var = tk.StringVar(value="nm")
         self.sdk_footer_var = tk.StringVar(
@@ -706,7 +711,16 @@ class OceanLabApp:
             bordercolor="#cbd5e1",
             lightcolor="#0f6cbd",
             darkcolor="#0f6cbd",
-            thickness=9,
+            thickness=16,
+        )
+        style.configure(
+            "AcquisitionComplete.Horizontal.TProgressbar",
+            troughcolor="#e5eaf0",
+            background="#198754",
+            bordercolor="#cbd5e1",
+            lightcolor="#198754",
+            darkcolor="#198754",
+            thickness=16,
         )
 
     def build_ui(self) -> None:
@@ -933,6 +947,7 @@ class OceanLabApp:
             ("缩小", "zoom_out_128px.png", "\ue71f", lambda: self.toggle_plot_mode("zoom_out"), "zoom_out"),
             ("手动选择缩放范围", "manual_zoom128px.png", "\ue71e", lambda: self.toggle_plot_mode("select"), "select"),
             ("打开/关闭拖拽模式", "drag_128px.png", "\ue815", lambda: self.toggle_plot_mode("drag"), "drag"),
+            ("添加并拖动十字架", "crosshair_128px.png", "⌖", lambda: self.toggle_plot_mode("crosshair"), "crosshair"),
         )
         for tooltip, icon_file, fallback_icon, command, mode in plot_tools:
             icon = self.load_oceanview_toolbar_icon(icon_file)
@@ -1011,7 +1026,9 @@ class OceanLabApp:
         canvas = self.tk.Canvas(main, highlightthickness=0, background=SpectrumPlot.BG)
         canvas.pack(fill="both", expand=True)
         self.plot = SpectrumPlot(canvas)
+        self.plot.crosshair_drag_preview_enabled = self.current_workspace() != "采集"
         self.plot.cursor_callback = self.update_cursor_readout
+        self.plot.crosshair_callback = self.update_crosshair_readout
         self.plot.limit_callback = lambda: self.status_var.set("已达到最大显示范围")
         self.plot.mode_callback = self.update_plot_mode_buttons
         self.plot.set_interaction_mode("normal")
@@ -1019,7 +1036,7 @@ class OceanLabApp:
         cursor_bar = self.ttk.Frame(metrics, style="Card.TFrame")
         self.cursor_bar = cursor_bar
         cursor_bar.pack(side="right", padx=(12, 20))
-        self.ttk.Label(cursor_bar, text="数据游标", style="Card.TLabel").pack(side="left")
+        self.ttk.Label(cursor_bar, textvariable=self.cursor_tool_name_var, style="Card.TLabel").pack(side="left")
         self.ttk.Label(cursor_bar, textvariable=self.cursor_axis_name_var, style="Card.TLabel").pack(side="left", padx=(14, 5))
         cursor_shell = self.tk.Frame(
             cursor_bar,
@@ -1120,6 +1137,7 @@ class OceanLabApp:
             )
         workspace = self.current_workspace()
         self._active_workspace = workspace
+        self.plot.crosshair_drag_preview_enabled = workspace != "采集"
         bounds = self.workspace_view_bounds.get(workspace, (None, None, None, None))
         self.plot.x_min, self.plot.x_max, self.plot.y_min, self.plot.y_max = bounds
         self.update_cursor_axis_labels()
@@ -1570,6 +1588,8 @@ class OceanLabApp:
         """Load the bundled toolbar asset so OceanView is not a runtime dependency."""
         path = TOOLBAR_ICON_DIR / filename
         if not path.is_file():
+            if filename == "crosshair_128px.png":
+                return self.create_crosshair_toolbar_icon()
             return None
         try:
             image = self.tk.PhotoImage(file=str(path))
@@ -1577,6 +1597,20 @@ class OceanLabApp:
         except (OSError, self.tk.TclError):
             logger.warning("Unable to load bundled toolbar icon: %s", path, exc_info=True)
             return None
+
+    def create_crosshair_toolbar_icon(self):
+        """Create the crosshair tool icon without adding another binary asset."""
+        image = self.tk.PhotoImage(width=42, height=42)
+        color = "#111111"
+        image.put(color, to=(19, 3, 23, 15))
+        image.put(color, to=(19, 27, 23, 39))
+        image.put(color, to=(3, 19, 15, 23))
+        image.put(color, to=(27, 19, 39, 23))
+        image.put(color, to=(16, 16, 26, 18))
+        image.put(color, to=(16, 24, 26, 26))
+        image.put(color, to=(16, 18, 18, 24))
+        image.put(color, to=(24, 18, 26, 24))
+        return image
 
     def attach_tooltip(self, widget, text: str) -> None:
         state = {"timer": None, "window": None}
@@ -1621,9 +1655,15 @@ class OceanLabApp:
     def update_plot_mode_buttons(self, active_mode: str) -> None:
         for mode, button in self.plot_tool_buttons.items():
             button.configure(style="PlotToolActive.TButton" if mode == active_mode else "PlotTool.TButton")
+        if hasattr(self, "cursor_position_entry"):
+            self.update_cursor_control_state()
 
     def toggle_plot_mode(self, mode: str) -> None:
-        self.plot.set_interaction_mode("normal" if self.plot.interaction_mode == mode else mode)
+        previous_mode = self.plot.interaction_mode
+        next_mode = "normal" if previous_mode == mode else mode
+        self.plot.set_interaction_mode(next_mode)
+        if "crosshair" in {previous_mode, next_mode}:
+            self.plot.draw()
 
     def fit_plot_both(self) -> None:
         self.plot.set_interaction_mode("normal")
@@ -1854,9 +1894,10 @@ class OceanLabApp:
             editor_row,
             variable,
             adjust_command,
+            height=54,
         )
         shell.pack(side="left", padx=(0, 4))
-        unit_cell = self.ttk.Frame(editor_row, width=72, height=48, style="Card.TFrame")
+        unit_cell = self.ttk.Frame(editor_row, width=72, height=54, style="Card.TFrame")
         unit_cell.pack(side="left", fill="y")
         unit_cell.grid_propagate(False)
         unit_cell.columnconfigure(0, weight=1)
@@ -1882,7 +1923,16 @@ class OceanLabApp:
 
     def build_acquisition_preset_selector(self, parent) -> None:
         """Place the common acquisition preset selector in a section header."""
-        self.ttk.Label(parent, text="预设", style="Hint.TLabel").pack(side="left", padx=(0, 4))
+        self.preset_selector_label = self.tk.Label(
+            parent,
+            text="预设",
+            background="#ffffff",
+            foreground="#0f4c81",
+            font=("Microsoft YaHei UI", 11, "bold"),
+            padx=0,
+            pady=0,
+        )
+        self.preset_selector_label.pack(side="left", padx=(0, 7))
         preset_group = self.tk.Frame(
             parent,
             background="#94a3b8",
@@ -1895,7 +1945,7 @@ class OceanLabApp:
         for index, name in enumerate(INTEGRATION_PRESET_NAMES):
             if index:
                 self.tk.Frame(preset_group, width=1, background="#cbd5e1").pack(side="left", fill="y")
-            cell = self.tk.Frame(preset_group, width=42, height=34, background="#ffffff")
+            cell = self.tk.Frame(preset_group, width=56, height=44, background="#ffffff")
             cell.pack(side="left")
             cell.pack_propagate(False)
             button = self.tk.Radiobutton(
@@ -1905,7 +1955,7 @@ class OceanLabApp:
                 value=name,
                 command=self.on_integration_preset_changed,
                 indicatoron=False,
-                font=("Microsoft YaHei UI", 11, "bold"),
+                font=("Microsoft YaHei UI", 13, "bold"),
                 relief="flat",
                 offrelief="flat",
                 overrelief="flat",
@@ -1940,7 +1990,6 @@ class OceanLabApp:
             self.range_button,
         ):
             widget.configure(state=state)
-        self.apply_button.configure(state="normal" if enabled and not self.single_in_progress else "disabled")
         self.mode_combo.configure(state="readonly" if enabled else "disabled")
         self.update_advanced_control_states()
         self.update_acquisition_buttons()
@@ -2038,13 +2087,12 @@ class OceanLabApp:
         self.start_button.configure(state="disabled" if self.acquiring else "normal")
         self.single_button.configure(state="disabled" if self.acquiring else "normal")
         self.stop_button.configure(state="normal" if self.acquiring else "disabled")
-        self.apply_button.configure(state="disabled" if self.acquiring else "normal")
 
     def refresh_preset_segments(self) -> None:
         selected_name = self.integration_preset_var.get()
         for button, name in zip(self.integration_preset_buttons, INTEGRATION_PRESET_NAMES):
             selected = name == selected_name
-            background = "#dbeafe" if selected else "#f8fafc"
+            background = "#bfdbfe" if selected else "#f8fafc"
             button.configure(
                 background=background,
                 selectcolor=background,
@@ -2082,7 +2130,7 @@ class OceanLabApp:
             value <= 0
             or unit not in ("ms", "s")
             or save_format not in SAVE_FORMAT_OPTIONS
-            or suffix_mode not in (SAVE_SUFFIX_TIME, SAVE_SUFFIX_SEQUENCE)
+            or suffix_mode not in (SAVE_SUFFIX_TIME, SAVE_SUFFIX_SEQUENCE, SAVE_SUFFIX_NONE)
         ):
             return False
         if self.share_variable_name_var.get():
@@ -2130,6 +2178,7 @@ class OceanLabApp:
             self.update_save_button_label()
         finally:
             self._syncing_settings = False
+        self.refresh_save_verification_state()
 
     def on_integration_preset_changed(self, _event=None) -> None:
         try:
@@ -2138,6 +2187,7 @@ class OceanLabApp:
             requested_index = self._active_integration_preset
         if requested_index == self._active_integration_preset:
             self.refresh_preset_segments()
+            self.refresh_save_verification_state()
             return
         if not self.commit_current_acquisition_preset():
             self.integration_preset_var.set(INTEGRATION_PRESET_NAMES[self._active_integration_preset])
@@ -2184,6 +2234,10 @@ class OceanLabApp:
         self.single_capture_history = {
             index: [] for index in range(len(INTEGRATION_PRESET_NAMES))
         }
+        self.preset_save_verified = {
+            index: False for index in range(len(INTEGRATION_PRESET_NAMES))
+        }
+        self.refresh_save_verification_state()
         self._next_single_capture_id = 1
         self._displayed_single_capture_id = None
         self._show_single_capture_history = False
@@ -2227,6 +2281,7 @@ class OceanLabApp:
             self.frame_context = None
             self.last_timestamp = None
             self._displayed_single_capture_id = None
+            self.refresh_save_verification_state()
             self.refresh_plot()
             return
 
@@ -2245,7 +2300,10 @@ class OceanLabApp:
             self.reference_timestamp = None
         if cleared:
             self.update_baseline_state()
-        self.mark_save_pending()
+        if preset_index in self.single_capture_candidates:
+            self.mark_save_pending()
+        else:
+            self.refresh_save_verification_state()
         self.refresh_plot()
 
     def active_preset_single_capture_series(self) -> list[PlotSeries]:
@@ -2266,7 +2324,7 @@ class OceanLabApp:
             )
             result.append(
                 PlotSeries(
-                    f"{prefix}｜{snapshot.display_name}",
+                    f"{prefix:<6}｜{snapshot.display_name}",
                     x_values,
                     snapshot.frame.values,
                     colors[position],
@@ -2520,11 +2578,19 @@ class OceanLabApp:
         self.refresh_plot()
 
     def update_cursor_readout(self, x: float, y: float) -> None:
+        if self.plot.interaction_mode == "crosshair":
+            return
         if self.current_plot_uses_pixels():
             self.cursor_position_var.set(f"{x:.0f}")
         else:
             self.cursor_position_var.set(f"{x:.2f}")
         self.cursor_var.set(f"强度: {y:.2f}")
+
+    def update_crosshair_readout(self, x: float, y: float) -> None:
+        if self.plot.interaction_mode != "crosshair":
+            return
+        self.cursor_position_var.set(f"{x:.2f}")
+        self.cursor_var.set(f"Y: {y:.2f}")
 
     def update_cursor_axis_labels(self) -> None:
         if self.current_plot_uses_pixels():
@@ -2536,14 +2602,29 @@ class OceanLabApp:
 
     def update_cursor_control_state(self) -> None:
         has_data = bool(self.plot.wavelengths and self.plot.values)
-        state = "normal" if has_data else "disabled"
+        crosshair_active = self.plot.interaction_mode == "crosshair"
+        state = "normal" if has_data and not crosshair_active else "disabled"
         self.cursor_position_entry.configure(state=state)
         self.cursor_up_button.configure(state=state)
         self.cursor_down_button.configure(state=state)
-        self.update_cursor_axis_labels()
+        if crosshair_active:
+            self.cursor_tool_name_var.set("十字架")
+            self.cursor_axis_name_var.set("X")
+            self.cursor_unit_var.set("pixel" if self.current_plot_uses_pixels() else "nm")
+            if self.plot.crosshair_position is None:
+                self.cursor_position_var.set("")
+                self.cursor_var.set("Y: —")
+            else:
+                self.update_crosshair_readout(*self.plot.crosshair_position)
+        else:
+            self.cursor_tool_name_var.set("数据游标")
+            self.update_cursor_axis_labels()
+            if has_data and self.plot.cursor_index is not None:
+                index = self.plot.cursor_index
+                self.update_cursor_readout(self.plot.wavelengths[index], self.plot.values[index])
         if not has_data:
             self.cursor_position_var.set("")
-            self.cursor_var.set("光标: —")
+            self.cursor_var.set("Y: —" if crosshair_active else "光标: —")
 
     def apply_cursor_position(self, _event=None):
         if not self.plot.wavelengths:
@@ -2770,7 +2851,10 @@ class OceanLabApp:
         label_style: str = "RunIdle.TLabel",
     ) -> None:
         self.acquisition_progress.stop()
-        self.acquisition_progress.configure(mode="determinate")
+        self.acquisition_progress.configure(
+            mode="determinate",
+            style="Acquisition.Horizontal.TProgressbar",
+        )
         self.single_progress_var.set(0.0)
         self.run_state_var.set(state_text)
         self.run_state_label.configure(style=label_style)
@@ -2792,8 +2876,6 @@ class OceanLabApp:
         self.single_in_progress = False
         self.single_started_at = None
         self.single_expected_s = 0.0
-        if self.controls_enabled:
-            self.apply_button.configure(state="normal")
         self.update_acquisition_buttons()
         self.reset_acquisition_indicator()
 
@@ -2810,12 +2892,14 @@ class OceanLabApp:
         self.single_expected_s = self.estimated_single_duration_s(settings)
         self.frame_times.clear()
         self.acquisition_progress.stop()
-        self.acquisition_progress.configure(mode="determinate")
+        self.acquisition_progress.configure(
+            mode="determinate",
+            style="Acquisition.Horizontal.TProgressbar",
+        )
         self.single_progress_var.set(0.0)
         self.run_state_var.set("单次采集中")
         self.run_state_label.configure(style="RunPending.TLabel")
         self.set_status_lamp("#0f6cbd")
-        self.apply_button.configure(state="disabled")
         self.update_acquisition_buttons()
         self.single_progress_after_id = self.root.after(40, self.update_single_progress)
 
@@ -2842,7 +2926,14 @@ class OceanLabApp:
         self.single_started_at = None
         self.single_expected_s = 0.0
         self.acquisition_progress.stop()
-        self.acquisition_progress.configure(mode="determinate")
+        self.acquisition_progress.configure(
+            mode="determinate",
+            style=(
+                "AcquisitionComplete.Horizontal.TProgressbar"
+                if success
+                else "Acquisition.Horizontal.TProgressbar"
+            ),
+        )
         self.single_progress_var.set(100.0 if success else 0.0)
         if success:
             completion_time = datetime.now().strftime("%H:%M:%S")
@@ -2855,8 +2946,6 @@ class OceanLabApp:
             self.run_state_var.set("采集失败")
             self.run_state_label.configure(style="RunError.TLabel")
             self.set_status_lamp("#d13438")
-        if self.controls_enabled:
-            self.apply_button.configure(state="normal")
         self.update_acquisition_buttons()
 
     def simulation_tick(self) -> None:
@@ -2891,12 +2980,18 @@ class OceanLabApp:
         self.run_state_label.configure(style="RunActive.TLabel" if running else "RunIdle.TLabel")
         self.acquisition_progress.stop()
         if running:
-            self.acquisition_progress.configure(mode="indeterminate")
+            self.acquisition_progress.configure(
+                mode="indeterminate",
+                style="Acquisition.Horizontal.TProgressbar",
+            )
             self.single_progress_var.set(0.0)
             self.acquisition_progress.start(14)
             self.set_status_lamp("#198754")
         else:
-            self.acquisition_progress.configure(mode="determinate")
+            self.acquisition_progress.configure(
+                mode="determinate",
+                style="Acquisition.Horizontal.TProgressbar",
+            )
             self.single_progress_var.set(0.0)
             self.set_status_lamp("#d97706")
         if announce:
@@ -3441,6 +3536,8 @@ class OceanLabApp:
         base = self.sanitize_base_name(base_name) if base_name is not None else self.compose_save_base_name()
         file_format = save_format or self.save_format_var.get()
         suffix = suffix_mode or self.save_suffix_var.get()
+        if suffix == SAVE_SUFFIX_NONE:
+            return f"{base}{self.save_extension(file_format)}"
         if suffix == SAVE_SUFFIX_SEQUENCE:
             digits = sequence_digits if sequence_digits is not None else int(self.sequence_digits_var.get())
             number = sequence if sequence is not None else self.save_sequence
@@ -3457,16 +3554,27 @@ class OceanLabApp:
     def update_save_button_label(self) -> None:
         self.save_button_text_var.set("保存 TXT" if self.save_format_var.get() == SAVE_FORMAT_TXT else "保存 CSV")
 
+    def refresh_save_verification_state(self) -> None:
+        """Restore the independent saved-state color for the active preset."""
+        self.save_verified = bool(
+            self.preset_save_verified.get(self._active_integration_preset, False)
+        )
+        if hasattr(self, "save_button"):
+            self.save_button.configure(
+                style="Saved.TButton" if self.save_verified else "Primary.TButton"
+            )
+
     def mark_save_pending(self, *_args) -> None:
         """Show that the current spectrum/settings have not passed file verification yet."""
-        self.save_verified = False
-        if hasattr(self, "save_button"):
-            self.save_button.configure(style="Primary.TButton")
+        if getattr(self, "_syncing_settings", False):
+            return
+        self.preset_save_verified[self._active_integration_preset] = False
+        self.refresh_save_verification_state()
 
     def mark_save_verified(self) -> None:
         """Green is reserved for a file that was written, reopened, and verified."""
-        self.save_verified = True
-        self.save_button.configure(style="Saved.TButton")
+        self.preset_save_verified[self._active_integration_preset] = True
+        self.refresh_save_verification_state()
 
     def on_processing_mode_changed(self, _event=None) -> None:
         self.mark_save_pending()
@@ -3576,20 +3684,31 @@ class OceanLabApp:
             style="Hint.TLabel",
         ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 6))
         self.ttk.Label(name_box, text="文件后缀", style="Card.TLabel").grid(row=4, column=0, sticky="w", padx=(0, 12), pady=5)
-        self.ttk.Radiobutton(
-            name_box,
+        suffix_options = self.ttk.Frame(name_box, style="Card.TFrame")
+        suffix_options.grid(row=4, column=1, columnspan=3, sticky="ew", pady=5)
+        self.save_suffix_time_radio = LargeRadiobutton(
+            suffix_options,
             text="按时间",
             variable=draft_suffix,
             value=SAVE_SUFFIX_TIME,
-        ).grid(row=4, column=1, sticky="w", pady=5)
-        self.ttk.Radiobutton(
-            name_box,
+        )
+        self.save_suffix_time_radio.pack(side="left", padx=(0, 14))
+        self.save_suffix_sequence_radio = LargeRadiobutton(
+            suffix_options,
             text="按序号",
             variable=draft_suffix,
             value=SAVE_SUFFIX_SEQUENCE,
-        ).grid(row=4, column=2, sticky="w", pady=5)
-        digits_row = self.ttk.Frame(name_box, style="Card.TFrame")
-        digits_row.grid(row=4, column=3, sticky="e", pady=5)
+        )
+        self.save_suffix_sequence_radio.pack(side="left", padx=(0, 14))
+        self.save_suffix_none_radio = LargeRadiobutton(
+            suffix_options,
+            text="无后缀",
+            variable=draft_suffix,
+            value=SAVE_SUFFIX_NONE,
+        )
+        self.save_suffix_none_radio.pack(side="left", padx=(0, 14))
+        digits_row = self.ttk.Frame(suffix_options, style="Card.TFrame")
+        digits_row.pack(side="right")
         self.ttk.Label(digits_row, text="位数", style="Card.TLabel").pack(side="left", padx=(0, 5))
 
         def adjust_draft_digits(direction: int) -> None:
