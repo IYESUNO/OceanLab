@@ -15,11 +15,11 @@ VSVersionInfo(
         '080404B0',
         [
           StringStruct('CompanyName', 'OceanLab'),
-          StringStruct('FileDescription', 'OceanLab 光谱采集软件'),
+          StringStruct('FileDescription', 'OceanLab Spectroscopy Software'),
           StringStruct('FileVersion', '1.0.1'),
           StringStruct('InternalName', 'OceanLab'),
           StringStruct('OriginalFilename', 'OceanLab.exe'),
-          StringStruct('ProductName', 'OceanLab 光谱采集软件'),
+          StringStruct('ProductName', 'OceanLab Spectroscopy Software'),
           StringStruct('ProductVersion', '1.0.1')
         ]
       )

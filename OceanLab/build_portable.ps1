@@ -40,8 +40,8 @@ if (Test-Path -LiteralPath $BundleRoot) {
     Remove-Item -LiteralPath $BundleRoot -Recurse -Force
 }
 Move-Item -LiteralPath (Join-Path $DistRoot "OceanLab") -Destination $BundleRoot
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot "README_zh-CN.md") -Destination $BundleRoot
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot "packaging\PORTABLE_README_zh-CN.txt") -Destination $BundleRoot
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "README.md") -Destination $BundleRoot
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "packaging\PORTABLE_README.txt") -Destination $BundleRoot
 
 $ZipPath = Join-Path $ReleaseRoot "$BundleName.zip"
 if (Test-Path -LiteralPath $ZipPath) {

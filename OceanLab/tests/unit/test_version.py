@@ -16,8 +16,8 @@ class VersionConsistencyTest(unittest.TestCase):
         for relative_path in (
             "build_portable.ps1",
             "packaging/version_info.txt",
-            "packaging/PORTABLE_README_zh-CN.txt",
-            "README_zh-CN.md",
+            "packaging/PORTABLE_README.txt",
+            "README.md",
         ):
             content = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
             self.assertIn(APP_VERSION, content, relative_path)
