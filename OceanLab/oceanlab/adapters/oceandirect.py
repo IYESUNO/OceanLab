@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import __future__
 import importlib
+import importlib.util
 import math
 import os
 import sys
@@ -19,6 +21,7 @@ from ..domain.models import (
 
 
 DEFAULT_SDK_HOME = Path(r"C:\OceanDirect")
+_WINDOWS_DLL_HANDLES: list[Any] = []
 
 
 def normalize_sdk_home(value: str | os.PathLike[str]) -> Path:
@@ -38,10 +41,16 @@ def is_oceandirect_home(path: Path) -> bool:
 
 def oceandirect_candidates() -> list[Path]:
     candidates: list[Path] = []
+    program_files = os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles")
+    installed_locations = (
+        Path(program_files) / "Ocean Optics" / "OceanDirect",
+        Path(program_files) / "Ocean Insight" / "OceanDirect",
+    ) if program_files else ()
     for value in (
         os.environ.get("OCEANDIRECT_HOME"),
         os.environ.get("OCEANDIRECT_SDK_HOME"),
         DEFAULT_SDK_HOME,
+        *installed_locations,
     ):
         if value:
             path = normalize_sdk_home(value)
@@ -63,11 +72,76 @@ def load_oceandirect(sdk_home: Path):
     python_dir = sdk_home / "Python"
     if not python_dir.exists():
         raise FileNotFoundError(f"找不到 OceanDirect Python SDK：{python_dir}")
+    _prepare_windows_dll_search(sdk_home)
     python_text = str(python_dir)
     if python_text not in sys.path:
         sys.path.insert(0, python_text)
-    module = importlib.import_module("oceandirect.OceanDirectAPI")
+
+    # Current OceanDirect releases use annotations such as ``list[int]`` and
+    # ``tuple[int, str]``. They are valid on Python 3.9+, but legacy Python
+    # versions evaluate them while importing and raise "'type' object is not
+    # subscriptable". Compile this one external SDK module with postponed
+    # annotation evaluation. The SDK source on disk remains untouched.
+    importlib.import_module("oceandirect")
+    module_name = "oceandirect.OceanDirectAPI"
+    module_path = python_dir / "oceandirect" / "OceanDirectAPI.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None:
+        raise ImportError(f"无法创建 OceanDirect SDK 模块：{module_path}")
+    module = importlib.util.module_from_spec(spec)
+    previous_module = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        source = module_path.read_bytes()
+        code = compile(
+            source,
+            str(module_path),
+            "exec",
+            flags=__future__.annotations.compiler_flag,
+            dont_inherit=True,
+        )
+        exec(code, module.__dict__)
+    except Exception:
+        if previous_module is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous_module
+        raise
     return module.OceanDirectAPI, module.OceanDirectError
+
+
+def _prepare_windows_dll_search(sdk_home: Path) -> None:
+    if os.name != "nt":
+        return
+
+    sdk_lib = sdk_home / "Python" / "oceandirect" / "lib"
+    if not sdk_lib.is_dir():
+        return
+
+    # Python 3.7 uses the classic Windows DLL search behavior. Add the official
+    # SDK directory explicitly and preload the application-local VC142 runtime
+    # so very old offline instrument computers do not need a separate VC++
+    # Redistributable installation.
+    app_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    search_dirs = (app_root, sdk_lib)
+    current_path = os.environ.get("PATH", "")
+    existing_parts = [part for part in current_path.split(os.pathsep) if part]
+    prefixes = [str(path) for path in search_dirs if str(path) not in existing_parts]
+    if prefixes:
+        os.environ["PATH"] = os.pathsep.join(prefixes + existing_parts)
+
+    import ctypes
+
+    for filename in ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"):
+        runtime_path = app_root / filename
+        if runtime_path.is_file():
+            _WINDOWS_DLL_HANDLES.append(ctypes.WinDLL(str(runtime_path)))
+
+    set_dll_directory = getattr(ctypes.windll.kernel32, "SetDllDirectoryW", None)
+    if set_dll_directory is not None:
+        set_dll_directory.argtypes = (ctypes.c_wchar_p,)
+        set_dll_directory.restype = ctypes.c_bool
+        set_dll_directory(str(sdk_lib))
 
 
 class OceanDirectSpectrometer:

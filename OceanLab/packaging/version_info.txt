@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 1, 0),
-    prodvers=(1, 0, 1, 0),
+    filevers=(2, 0, 0, 0),
+    prodvers=(2, 0, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,11 +16,11 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'OceanLab'),
           StringStruct('FileDescription', 'OceanLab Spectroscopy Software'),
-          StringStruct('FileVersion', '1.0.1'),
+          StringStruct('FileVersion', '2.0.0'),
           StringStruct('InternalName', 'OceanLab'),
           StringStruct('OriginalFilename', 'OceanLab.exe'),
           StringStruct('ProductName', 'OceanLab Spectroscopy Software'),
-          StringStruct('ProductVersion', '1.0.1')
+          StringStruct('ProductVersion', '2.0.0')
         ]
       )
     ]),

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 
 def build_header(app, root) -> None:
-    header = app.ttk.Frame(root, style="Header.TFrame", padding=(18, 10, 18, 10))
+    padding = (10, 6, 10, 6) if app.compact_layout else (18, 10, 18, 10)
+    header = app.ttk.Frame(root, style="Header.TFrame", padding=padding)
     header.pack(fill="x")
     app.ttk.Label(header, text="OceanLab", style="Title.TLabel").pack(side="left")
     app.ttk.Label(header, text="荧光光谱采集", style="Sub.TLabel").pack(side="left", padx=(12, 0), pady=(6, 0))
@@ -21,7 +22,8 @@ def build_header(app, root) -> None:
 
 
 def build_footer(app, root) -> None:
-    footer = app.ttk.Frame(root, padding=(16, 2, 16, 9))
+    padding = (10, 1, 10, 4) if app.compact_layout else (16, 2, 16, 9)
+    footer = app.ttk.Frame(root, padding=padding)
     footer.pack(fill="x")
     app.ttk.Label(footer, textvariable=app.status_var, style="Footer.TLabel").pack(side="left")
     sdk_area = app.ttk.Frame(footer)
@@ -30,7 +32,7 @@ def build_footer(app, root) -> None:
     app.sdk_select_button = app.ttk.Button(
         sdk_area,
         text="选择 OceanDirect…",
-        style="Tool.TButton",
+        style="FooterTool.TButton" if app.compact_layout else "Tool.TButton",
         command=app.choose_oceandirect_home,
     )
     if not app.sdk_validator(app.sdk_home):

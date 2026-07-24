@@ -45,12 +45,19 @@ def probe_device(sdk_home, acquire_once: bool = False) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     logger.info("OceanLab process started, Python=%s", sys.version.replace("\n", " "))
+    argument_list = list(sys.argv[1:] if argv is None else argv)
+    if "--version" in argument_list and sys.stdout is None:
+        # PyInstaller's windowed executable intentionally has no console
+        # stream.  Logging the version still lets this diagnostic exit
+        # successfully instead of opening the GUI error dialog.
+        logger.info("OceanLab %s", APP_VERSION)
+        return 0
     parser = argparse.ArgumentParser(description="OceanLab OceanDirect spectroscopy acquisition software")
     parser.add_argument("--version", action="version", version=f"OceanLab {APP_VERSION}")
     parser.add_argument("--sdk-home", default=None, help="显式指定 OceanDirect SDK 根目录；省略时自动检测")
     parser.add_argument("--probe", action="store_true", help="仅检测设备，不启动界面")
     parser.add_argument("--once", action="store_true", help="检测设备并采集一帧")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(argument_list)
     sdk_home = resolve_oceandirect_home(args.sdk_home)
     logger.info("OceanDirect SDK path resolved to %s (valid=%s)", sdk_home, is_oceandirect_home(sdk_home))
     if args.probe or args.once:

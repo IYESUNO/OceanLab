@@ -14,9 +14,9 @@ class VersionConsistencyTest(unittest.TestCase):
     def test_release_version_is_synchronized(self) -> None:
         self.assertEqual(PACKAGE_VERSION, APP_VERSION)
         for relative_path in (
-            "build_portable.ps1",
+            "build_win7_legacy.ps1",
             "packaging/version_info.txt",
-            "packaging/PORTABLE_README.txt",
+            "packaging/PORTABLE_README_WIN7.txt",
             "README.md",
         ):
             content = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")

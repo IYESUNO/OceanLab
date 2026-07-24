@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol
+from ._typing import Protocol
 
 from ..domain.models import AcquisitionRequest, ConnectedDevice, SpectrumContext, SpectrumFrame
 

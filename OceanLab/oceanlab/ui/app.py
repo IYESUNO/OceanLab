@@ -414,7 +414,7 @@ class OceanLabApp:
         """Bring the main window to the foreground after Windows finishes creating it."""
         try:
             self.root.deiconify()
-            self.root.state("normal")
+            self.root.state("zoomed" if self.compact_layout else "normal")
             self.root.lift()
             self.root.attributes("-topmost", True)
             self.root.after(500, lambda: self.root.attributes("-topmost", False))
@@ -434,10 +434,19 @@ class OceanLabApp:
         dpi_scale = max(1.0, min(3.0, float(self.root.winfo_fpixels("1i")) / 96.0))
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        initial_width = min(round(1630 * dpi_scale), max(1080, screen_width - round(64 * dpi_scale)))
-        initial_height = min(round(820 * dpi_scale), max(680, screen_height - round(96 * dpi_scale)))
-        minimum_width = min(round(1350 * dpi_scale), max(900, screen_width - round(32 * dpi_scale)))
-        minimum_height = min(round(680 * dpi_scale), max(600, screen_height - round(64 * dpi_scale)))
+        self.compact_layout = screen_width <= 1440 or screen_height <= 800
+        if self.compact_layout:
+            # Windows 7 lab machines commonly run at 1366x768.  Use almost all of
+            # the work area and let show_window maximize around the taskbar.
+            initial_width = max(1024, screen_width - round(24 * dpi_scale))
+            initial_height = max(620, screen_height - round(72 * dpi_scale))
+            minimum_width = min(1120, initial_width)
+            minimum_height = min(620, initial_height)
+        else:
+            initial_width = min(round(1630 * dpi_scale), max(1080, screen_width - round(64 * dpi_scale)))
+            initial_height = min(round(820 * dpi_scale), max(680, screen_height - round(96 * dpi_scale)))
+            minimum_width = min(round(1350 * dpi_scale), max(900, screen_width - round(32 * dpi_scale)))
+            minimum_height = min(round(680 * dpi_scale), max(600, screen_height - round(64 * dpi_scale)))
         self.root.geometry(f"{initial_width}x{initial_height}")
         self.root.minsize(minimum_width, minimum_height)
         self.root.configure(bg="#f3f6f9")
@@ -584,8 +593,8 @@ class OceanLabApp:
         style.map("Tool.TButton", background=[("active", "#dde7f0")])
         style.configure(
             "PlotTool.TButton",
-            font=("Segoe MDL2 Assets", 22),
-            padding=(10, 7),
+            font=("Segoe MDL2 Assets", 14 if self.compact_layout else 22),
+            padding=(3, 2) if self.compact_layout else (10, 7),
             foreground="#26364a",
             background="#f8fafc",
             bordercolor="#cbd5e1",
@@ -594,8 +603,8 @@ class OceanLabApp:
         style.map("PlotTool.TButton", background=[("active", "#e5edf5")], bordercolor=[("active", "#94a3b8")])
         style.configure(
             "PlotToolActive.TButton",
-            font=("Segoe MDL2 Assets", 22),
-            padding=(10, 7),
+            font=("Segoe MDL2 Assets", 14 if self.compact_layout else 22),
+            padding=(3, 2) if self.compact_layout else (10, 7),
             foreground="#ffffff",
             background="#0f6cbd",
             bordercolor="#0f6cbd",
@@ -603,9 +612,19 @@ class OceanLabApp:
         )
         style.map("PlotToolActive.TButton", background=[("active", "#115ea3")])
         style.configure("TButton", font=("Microsoft YaHei UI", 10), padding=(10, 7))
-        style.configure("TEntry", padding=5)
-        style.configure("TSpinbox", padding=5)
-        style.configure("TCombobox", padding=5)
+        input_padding = 2 if self.compact_layout else 5
+        input_font = ("Microsoft YaHei UI", 9 if self.compact_layout else 10)
+        style.configure("TEntry", padding=input_padding, font=input_font)
+        style.configure("TSpinbox", padding=input_padding, font=input_font)
+        style.configure("TCombobox", padding=input_padding, font=input_font)
+        style.configure(
+            "FooterTool.TButton",
+            font=("Microsoft YaHei UI", 8),
+            padding=(4, 1),
+            foreground="#26364a",
+            background="#eef2f6",
+        )
+        style.map("FooterTool.TButton", background=[("active", "#dde7f0")])
         style.configure("TCheckbutton", background="#ffffff", font=("Microsoft YaHei UI", 9))
         style.configure("TRadiobutton", background="#ffffff", foreground="#172033", font=("Microsoft YaHei UI", 10))
         style.configure("Card.TLabelframe", background="#ffffff", bordercolor="#cbd5e1", borderwidth=1, relief="solid")
@@ -631,7 +650,7 @@ class OceanLabApp:
             background="#e8edf3",
             foreground="#415166",
             font=("Microsoft YaHei UI", 10),
-            padding=(18, 8),
+            padding=(12, 6) if self.compact_layout else (18, 8),
         )
         style.map(
             "Sidebar.TNotebook.Tab",
@@ -727,15 +746,23 @@ class OceanLabApp:
         root = self.root
         build_header(self, root)
 
-        body = self.ttk.Frame(root, padding=(14, 12, 14, 10))
+        body_padding = (8, 6, 8, 4) if self.compact_layout else (14, 12, 14, 10)
+        panel_padding = 7 if self.compact_layout else 12
+        # Keep the same visual proportion as the desktop layout: the sidebar
+        # occupies roughly 30% at 1366 px instead of crowding the plot.
+        sidebar_width = 400 if self.compact_layout else 570
+        sidebar_gap = 7 if self.compact_layout else 12
+        page_padding = 8 if self.compact_layout else 14
+        body = self.ttk.Frame(root, padding=body_padding)
         body.pack(fill="both", expand=True)
-        sidebar = self.ttk.Frame(body, style="Card.TFrame", width=570)
-        sidebar.pack(side="left", fill="y", padx=(0, 12))
+        sidebar = self.ttk.Frame(body, style="Card.TFrame", width=sidebar_width)
+        sidebar.pack(side="left", fill="y", padx=(0, sidebar_gap))
         sidebar.pack_propagate(False)
-        main = self.ttk.Frame(body, style="Card.TFrame", padding=12)
+        main = self.ttk.Frame(body, style="Card.TFrame", padding=panel_padding)
         main.pack(side="left", fill="both", expand=True)
 
-        sidebar_save_panel = self.ttk.Frame(sidebar, style="Card.TFrame", padding=(14, 8, 14, 12))
+        save_padding = (8, 4, 8, 7) if self.compact_layout else (14, 8, 14, 12)
+        sidebar_save_panel = self.ttk.Frame(sidebar, style="Card.TFrame", padding=save_padding)
         sidebar_save_panel.pack(side="bottom", fill="x", padx=1, pady=(0, 1))
         self.sidebar_save_panel = sidebar_save_panel
 
@@ -766,7 +793,7 @@ class OceanLabApp:
         acquisition_canvas.configure(yscrollcommand=update_acquisition_scrollbar)
         acquisition_scrollbar.pack(side="right", fill="y")
         acquisition_canvas.pack(side="left", fill="both", expand=True)
-        acquisition_tab = self.ttk.Frame(acquisition_canvas, style="Card.TFrame", padding=14)
+        acquisition_tab = self.ttk.Frame(acquisition_canvas, style="Card.TFrame", padding=page_padding)
         acquisition_window = acquisition_canvas.create_window((0, 0), window=acquisition_tab, anchor="nw")
         acquisition_tab.bind(
             "<Configure>",
@@ -793,9 +820,9 @@ class OceanLabApp:
             "<Leave>",
             lambda _event: self.root.unbind_all("<MouseWheel>"),
         )
-        processing_tab = self.ttk.Frame(notebook, style="Card.TFrame", padding=14)
-        pl_tab = self.ttk.Frame(notebook, style="Card.TFrame", padding=14)
-        absorbance_tab = self.ttk.Frame(notebook, style="Card.TFrame", padding=14)
+        processing_tab = self.ttk.Frame(notebook, style="Card.TFrame", padding=page_padding)
+        pl_tab = self.ttk.Frame(notebook, style="Card.TFrame", padding=page_padding)
+        absorbance_tab = self.ttk.Frame(notebook, style="Card.TFrame", padding=page_padding)
         self.sidebar_notebook = notebook
         self.acquisition_tab = acquisition_page
         self.acquisition_canvas = acquisition_canvas
@@ -824,6 +851,12 @@ class OceanLabApp:
             variable=self.share_variable_name_var,
             command=self.on_share_variable_name_changed,
         )
+        if self.compact_layout:
+            shared_variable_check.configure(padx=0, pady=0)
+            shared_variable_check.box.configure(width=22, height=22)
+            shared_variable_check.box.coords(shared_variable_check.box_outline, 3, 3, 19, 19)
+            shared_variable_check.box.coords(shared_variable_check.box_check, 6, 11, 10, 15, 17, 7)
+            shared_variable_check.text_label.configure(font=("Microsoft YaHei UI", 9), padx=1)
         self.shared_variable_check = shared_variable_check
         shared_variable_check.pack(side="left", padx=(8, 0))
         self.shared_variable_box = shared_variable_check.box
@@ -834,7 +867,7 @@ class OceanLabApp:
         base_name_shell = self.tk.Frame(
             save_controls,
             width=1,
-            height=54,
+            height=40 if self.compact_layout else 54,
             background="#ffffff",
             borderwidth=0,
             highlightthickness=1,
@@ -852,7 +885,7 @@ class OceanLabApp:
             base_name_shell,
             textvariable=self.base_name_var,
             width=36,
-            font=("Microsoft YaHei UI", 11),
+            font=("Microsoft YaHei UI", 9 if self.compact_layout else 11),
             background="#ffffff",
             foreground="#172033",
             insertbackground="#172033",
@@ -869,7 +902,7 @@ class OceanLabApp:
             textvariable=self.position_var,
             width=6,
             justify="center",
-            font=("Microsoft YaHei UI", 11),
+            font=("Microsoft YaHei UI", 9 if self.compact_layout else 11),
             background="#ffffff",
             foreground="#172033",
             insertbackground="#172033",
@@ -935,7 +968,7 @@ class OceanLabApp:
 
         toolbar = self.ttk.Frame(main, style="Card.TFrame")
         self.plot_toolbar = toolbar
-        toolbar.pack(fill="x", padx=2, pady=(0, 8))
+        toolbar.pack(fill="x", padx=2, pady=(0, 4 if self.compact_layout else 8))
         self.plot_tool_buttons = {}
         self.plot_toolbar_images = []
         plot_tools = (
@@ -956,7 +989,7 @@ class OceanLabApp:
                 button = self.ttk.Button(toolbar, image=icon, style="PlotTool.TButton", command=command)
             else:
                 button = self.ttk.Button(toolbar, text=fallback_icon, width=4, style="PlotTool.TButton", command=command)
-            button.pack(side="left", padx=(0, 5))
+            button.pack(side="left", padx=(0, 3 if self.compact_layout else 5))
             self.attach_tooltip(button, tooltip)
             if mode:
                 self.plot_tool_buttons[mode] = button
@@ -965,16 +998,18 @@ class OceanLabApp:
         self.metrics_bar = metrics
         metrics.pack(fill="x", padx=2, pady=(0, 7))
         def compact_metric(caption: str, variable, value_width: int, background: str):
+            if self.compact_layout:
+                value_width = max(6, value_width - 1)
             group = self.tk.Frame(
                 metrics,
                 background=background,
                 highlightthickness=1,
                 highlightbackground="#cbd5e1",
                 borderwidth=0,
-                padx=5,
+                padx=3 if self.compact_layout else 5,
                 pady=3,
             )
-            group.pack(side="left", padx=(0, 5))
+            group.pack(side="left", padx=(0, 3 if self.compact_layout else 5))
             caption_label = self.tk.Label(
                 group,
                 text=caption,
@@ -1012,10 +1047,10 @@ class OceanLabApp:
             metrics,
             textvariable=self.saturation_var,
             style="Metric.TLabel",
-            width=12,
+            width=10 if self.compact_layout else 12,
             anchor="w",
         )
-        self.saturation_label.pack(side="left", padx=(3, 0))
+        self.saturation_label.pack(side="left", padx=(2 if self.compact_layout else 3, 0))
         self.single_history_warning_label = self.ttk.Label(
             main,
             textvariable=self.single_history_warning_var,
@@ -1026,6 +1061,9 @@ class OceanLabApp:
         canvas = self.tk.Canvas(main, highlightthickness=0, background=SpectrumPlot.BG)
         canvas.pack(fill="both", expand=True)
         self.plot = SpectrumPlot(canvas)
+        if self.compact_layout:
+            self.plot.PLOT_LEFT = 82
+            self.plot.Y_TITLE_X = 18
         self.plot.crosshair_drag_preview_enabled = self.current_workspace() != "采集"
         self.plot.cursor_callback = self.update_cursor_readout
         self.plot.crosshair_callback = self.update_crosshair_readout
@@ -1035,13 +1073,19 @@ class OceanLabApp:
 
         cursor_bar = self.ttk.Frame(metrics, style="Card.TFrame")
         self.cursor_bar = cursor_bar
-        cursor_bar.pack(side="right", padx=(12, 20))
+        if self.compact_layout:
+            cursor_bar.pack(side="right", padx=(8, 0))
+        else:
+            cursor_bar.pack(side="right", padx=(12, 20))
         self.ttk.Label(cursor_bar, textvariable=self.cursor_tool_name_var, style="Card.TLabel").pack(side="left")
-        self.ttk.Label(cursor_bar, textvariable=self.cursor_axis_name_var, style="Card.TLabel").pack(side="left", padx=(14, 5))
+        self.ttk.Label(cursor_bar, textvariable=self.cursor_axis_name_var, style="Card.TLabel").pack(
+            side="left",
+            padx=(8, 4) if self.compact_layout else (14, 5),
+        )
         cursor_shell = self.tk.Frame(
             cursor_bar,
-            width=190,
-            height=48,
+            width=145 if self.compact_layout else 190,
+            height=27 if self.compact_layout else 48,
             background="#ffffff",
             borderwidth=0,
             highlightthickness=1,
@@ -1057,7 +1101,7 @@ class OceanLabApp:
             cursor_shell,
             textvariable=self.cursor_position_var,
             justify="right",
-            font=("Microsoft YaHei UI", 11),
+            font=("Microsoft YaHei UI", 9 if self.compact_layout else 11),
             background="#ffffff",
             foreground="#172033",
             insertbackground="#172033",
@@ -1070,7 +1114,7 @@ class OceanLabApp:
         cursor_arrow_options = {
             "master": cursor_shell,
             "width": 4,
-            "font": ("Segoe MDL2 Assets", 10),
+            "font": ("Segoe UI Symbol", 8, "bold"),
             "foreground": "#183b66",
             "background": "#eef2f6",
             "activeforeground": "#0f4c81",
@@ -1082,17 +1126,20 @@ class OceanLabApp:
             "repeatdelay": 400,
             "repeatinterval": 80,
         }
-        self.cursor_up_button = self.tk.Button(text="\ueddb", command=lambda: self.step_data_cursor(1), **cursor_arrow_options)
+        self.cursor_up_button = self.tk.Button(text="▲", command=lambda: self.step_data_cursor(1), **cursor_arrow_options)
         self.cursor_up_button.grid(row=0, column=2, sticky="nsew")
         self.tk.Frame(cursor_shell, height=1, background="#94a3b8").grid(row=1, column=2, sticky="ew")
-        self.cursor_down_button = self.tk.Button(text="\ueddc", command=lambda: self.step_data_cursor(-1), **cursor_arrow_options)
+        self.cursor_down_button = self.tk.Button(text="▼", command=lambda: self.step_data_cursor(-1), **cursor_arrow_options)
         self.cursor_down_button.grid(row=2, column=2, sticky="nsew")
-        self.ttk.Label(cursor_bar, textvariable=self.cursor_unit_var, style="Card.TLabel").pack(side="left", padx=(6, 16))
+        self.ttk.Label(cursor_bar, textvariable=self.cursor_unit_var, style="Card.TLabel").pack(
+            side="left",
+            padx=(4, 8) if self.compact_layout else (6, 16),
+        )
         self.cursor_value_label = self.ttk.Label(
             cursor_bar,
             textvariable=self.cursor_var,
             style="Cursor.TLabel",
-            width=15,
+            width=15 if not self.compact_layout else 14,
             anchor="e",
         )
         self.cursor_value_label.pack(side="left")
@@ -1593,13 +1640,26 @@ class OceanLabApp:
             return None
         try:
             image = self.tk.PhotoImage(file=str(path))
-            return image.zoom(3, 3).subsample(10, 10)
+            divisor = 20 if self.compact_layout else 10
+            return image.zoom(3, 3).subsample(divisor, divisor)
         except (OSError, self.tk.TclError):
             logger.warning("Unable to load bundled toolbar icon: %s", path, exc_info=True)
             return None
 
     def create_crosshair_toolbar_icon(self):
         """Create the crosshair tool icon without adding another binary asset."""
+        if self.compact_layout:
+            image = self.tk.PhotoImage(width=22, height=22)
+            color = "#111111"
+            image.put(color, to=(10, 2, 12, 8))
+            image.put(color, to=(10, 14, 12, 20))
+            image.put(color, to=(2, 10, 8, 12))
+            image.put(color, to=(14, 10, 20, 12))
+            image.put(color, to=(8, 8, 14, 10))
+            image.put(color, to=(8, 12, 14, 14))
+            image.put(color, to=(8, 10, 10, 12))
+            image.put(color, to=(12, 10, 14, 12))
+            return image
         image = self.tk.PhotoImage(width=42, height=42)
         color = "#111111"
         image.put(color, to=(19, 3, 23, 15))
@@ -1758,7 +1818,7 @@ class OceanLabApp:
         shell = self.tk.Frame(
             row,
             width=104,
-            height=36,
+            height=24 if self.compact_layout else 36,
             background="#ffffff",
             borderwidth=0,
             highlightthickness=1,
@@ -1774,7 +1834,7 @@ class OceanLabApp:
             textvariable=variable,
             width=7,
             justify="right",
-            font=("Microsoft YaHei UI", 10),
+            font=("Microsoft YaHei UI", 9 if self.compact_layout else 10),
             background="#ffffff",
             foreground="#172033",
             insertbackground="#172033",
@@ -1796,7 +1856,7 @@ class OceanLabApp:
         arrow_options = {
             "master": shell,
             "width": 3,
-            "font": ("Segoe MDL2 Assets", 11),
+            "font": ("Segoe UI Symbol", 8, "bold"),
             "foreground": "#183b66",
             "background": "#eef2f6",
             "activeforeground": "#0f4c81",
@@ -1808,10 +1868,10 @@ class OceanLabApp:
             "repeatdelay": 400,
             "repeatinterval": 80,
         }
-        up_button = self.tk.Button(text="\ueddb", command=lambda: adjust(1), **arrow_options)
+        up_button = self.tk.Button(text="▲", command=lambda: adjust(1), **arrow_options)
         up_button.grid(row=0, column=2, sticky="nsew")
         self.tk.Frame(shell, height=1, background="#94a3b8").grid(row=1, column=2, sticky="ew")
-        down_button = self.tk.Button(text="\ueddc", command=lambda: adjust(-1), **arrow_options)
+        down_button = self.tk.Button(text="▼", command=lambda: adjust(-1), **arrow_options)
         down_button.grid(row=2, column=2, sticky="nsew")
         entry.bind("<Up>", lambda _event: (adjust(1), "break")[1])
         entry.bind("<Down>", lambda _event: (adjust(-1), "break")[1])
@@ -1821,6 +1881,8 @@ class OceanLabApp:
 
     def numeric_stepper_control(self, parent, variable, adjust_command, width: int = 124, height: int = 48):
         """Build the shared large numeric entry and two-button stepper."""
+        if self.compact_layout and height == 48:
+            height = 32
         shell = self.tk.Frame(
             parent,
             width=width,
@@ -1839,7 +1901,7 @@ class OceanLabApp:
             textvariable=variable,
             width=6,
             justify="right",
-            font=("Microsoft YaHei UI", 10),
+            font=("Microsoft YaHei UI", 9 if self.compact_layout else 10),
             background="#ffffff",
             foreground="#172033",
             insertbackground="#172033",
@@ -1883,21 +1945,33 @@ class OceanLabApp:
         unit_variable=None,
     ):
         row = self.ttk.Frame(parent, style="Card.TFrame")
-        row.pack(fill="x", pady=(4, 7))
-        header = self.ttk.Frame(row, style="Card.TFrame")
-        header.pack(fill="x")
-        self.ttk.Label(header, text=label, style="Card.TLabel").pack(side="left")
-        editor_row = self.ttk.Frame(row, style="Card.TFrame")
-        editor_row.pack(anchor="w", padx=(64, 0), pady=(5, 0))
+        if self.compact_layout:
+            row.pack(fill="x", pady=(3, 5))
+            row.columnconfigure(0, minsize=112)
+            self.ttk.Label(row, text=label, style="Card.TLabel").grid(row=0, column=0, sticky="w")
+            editor_row = self.ttk.Frame(row, style="Card.TFrame")
+            editor_row.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        else:
+            row.pack(fill="x", pady=(4, 7))
+            header = self.ttk.Frame(row, style="Card.TFrame")
+            header.pack(fill="x")
+            self.ttk.Label(header, text=label, style="Card.TLabel").pack(side="left")
+            editor_row = self.ttk.Frame(row, style="Card.TFrame")
+            editor_row.pack(anchor="w", padx=(64, 0), pady=(5, 0))
 
         shell, entry, plus_button, minus_button = self.numeric_stepper_control(
             editor_row,
             variable,
             adjust_command,
-            height=54,
+            height=32 if self.compact_layout else 54,
         )
         shell.pack(side="left", padx=(0, 4))
-        unit_cell = self.ttk.Frame(editor_row, width=72, height=54, style="Card.TFrame")
+        unit_cell = self.ttk.Frame(
+            editor_row,
+            width=72,
+            height=32 if self.compact_layout else 54,
+            style="Card.TFrame",
+        )
         unit_cell.pack(side="left", fill="y")
         unit_cell.grid_propagate(False)
         unit_cell.columnconfigure(0, weight=1)
@@ -1945,7 +2019,9 @@ class OceanLabApp:
         for index, name in enumerate(INTEGRATION_PRESET_NAMES):
             if index:
                 self.tk.Frame(preset_group, width=1, background="#cbd5e1").pack(side="left", fill="y")
-            cell = self.tk.Frame(preset_group, width=56, height=44, background="#ffffff")
+            preset_width = 48 if self.compact_layout else 56
+            preset_height = 38 if self.compact_layout else 44
+            cell = self.tk.Frame(preset_group, width=preset_width, height=preset_height, background="#ffffff")
             cell.pack(side="left")
             cell.pack_propagate(False)
             button = self.tk.Radiobutton(

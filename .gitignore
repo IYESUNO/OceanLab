@@ -4,6 +4,7 @@ __pycache__/
 **/tmp*/
 
 .build/
+.build-win7/
 build/
 dist/
 *.spec

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from ._typing import Protocol
 
 from ..domain.results import AbsorbanceDataset, ImportedSpectrum
 

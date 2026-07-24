@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Sequence
+
+from ._typing import Protocol
 
 from ..domain.models import BaselineSet, SpectrumFrame
 

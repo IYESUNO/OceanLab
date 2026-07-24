@@ -23,11 +23,11 @@ def configure_log_file() -> Path:
         try:
             directory.mkdir(parents=True, exist_ok=True)
             path = directory / "OceanLab.log"
+            file_handler = logging.FileHandler(path, encoding="utf-8")
             logging.basicConfig(
-                filename=path,
                 level=logging.INFO,
                 format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
-                encoding="utf-8",
+                handlers=[file_handler],
             )
             return path
         except OSError:
