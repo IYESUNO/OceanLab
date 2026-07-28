@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.1"
+    [string]$Version = "2.0.2"
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +11,7 @@ $WorkRoot = Join-Path $BuildRoot "work"
 $SpecRoot = Join-Path $BuildRoot "spec"
 $ReleaseRoot = Join-Path $PSScriptRoot "release"
 $BundleName = "OceanLab-$Version-win64-portable"
+$ExecutableName = "OceanLab-$Version.exe"
 
 if (-not (Test-Path -LiteralPath $VenvPython)) {
     python -m venv (Join-Path $BuildRoot "venv")
@@ -29,6 +30,7 @@ New-Item -ItemType Directory -Force -Path $DistRoot, $WorkRoot, $SpecRoot, $Rele
     --workpath $WorkRoot `
     --specpath $SpecRoot `
     --version-file (Join-Path $PSScriptRoot "packaging\version_info.txt") `
+    --icon (Join-Path $PSScriptRoot "assets\app_icons\oceanlab-icon-spectrum.ico") `
     --add-data "$(Join-Path $PSScriptRoot 'assets');assets" `
     --hidden-import ctypes `
     --hidden-import getpass `
@@ -40,7 +42,11 @@ if (Test-Path -LiteralPath $BundleRoot) {
     Remove-Item -LiteralPath $BundleRoot -Recurse -Force
 }
 Move-Item -LiteralPath (Join-Path $DistRoot "OceanLab") -Destination $BundleRoot
+Move-Item `
+    -LiteralPath (Join-Path $BundleRoot "OceanLab.exe") `
+    -Destination (Join-Path $BundleRoot $ExecutableName)
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "README.md") -Destination $BundleRoot
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Launch_OceanLab.cmd") -Destination $BundleRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "packaging\PORTABLE_README.txt") -Destination $BundleRoot
 
 $ZipPath = Join-Path $ReleaseRoot "$BundleName.zip"

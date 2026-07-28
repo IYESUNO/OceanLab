@@ -30,7 +30,10 @@ class SimulatedSpectrometer:
                 integration_min_us=8_000,
                 integration_max_us=65_000_000,
                 integration_increment_us=1_000,
-                max_intensity=65_535.0,
+                # Simulation models the usable QE65000 range rather than the
+                # nominal 16-bit ADC range.
+                max_intensity=63_000.0,
+                saturation_intensity=63_000.0,
             )
             span = info.wavelength_max - info.wavelength_min
             wavelengths = tuple(info.wavelength_min + span * index / (info.pixels - 1) for index in range(info.pixels))
@@ -81,7 +84,7 @@ class SimulatedSpectrometer:
                 + 0.13 * math.cos(index * 0.043 - phase * 0.7)
             )
             value = baseline + exposure_scale * drift * (excitation_tail + main_peak + shoulder + broad_tail)
-            values.append(min(65_535.0, max(0.0, value + ripple + noise)))
+            values.append(min(63_000.0, max(0.0, value + ripple + noise)))
         if context.boxcar > 0:
             values = self._boxcar(values, context.boxcar)
         self.frame_index += 1

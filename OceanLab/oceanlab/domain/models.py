@@ -43,6 +43,10 @@ class DeviceInfo:
     integration_increment_us: int
     max_intensity: float
     capabilities: DeviceCapabilities = DeviceCapabilities()
+    # Usable detector saturation threshold.  This can be lower than the
+    # nominal ADC maximum reported by max_intensity (for example, QE65000
+    # devices commonly use about 63000 counts as the saturation reference).
+    saturation_intensity: float | None = None
 
 
 @dataclass(frozen=True)

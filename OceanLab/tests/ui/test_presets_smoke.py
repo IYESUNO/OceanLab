@@ -58,6 +58,8 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.root.update_idletasks()
 
     def test_layout_switch_persistence_and_state(self) -> None:
+        self.assertEqual(self.app.save_format_var.get(), SAVE_FORMAT_TXT)
+        self.assertEqual(self.app.save_button_text_var.get(), "保存 TXT")
         self.assertEqual(self.app.integration_spin.cget("width"), 6)
         self.assertEqual(self.app.averages_spin.cget("width"), 6)
         self.assertEqual(self.app.integration_spin.winfo_width(), self.app.averages_spin.winfo_width())
@@ -417,7 +419,8 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertGreaterEqual(int(self.app.status_lamp.cget("height")), 26)
         self.assertEqual(len(self.app.plot_toolbar_images), 9)
         self.assertTrue(all(image.width() >= 38 and image.height() >= 38 for image in self.app.plot_toolbar_images))
-        self.assertEqual(len(self.app.plot_toolbar.winfo_children()), 9)
+        self.assertEqual(len(self.app.plot_toolbar.winfo_children()), 10)
+        self.assertIs(self.app.plot_legend_canvas.master, self.app.plot_toolbar)
         self.assertIn("crosshair", self.app.plot_tool_buttons)
         self.assertEqual(int(self.app.peak_metric_label.cget("width")), 8)
         self.assertEqual(int(self.app.position_metric_label.cget("width")), 10)
@@ -449,6 +452,27 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertEqual(self.app.sidebar_save_panel.winfo_height(), panel_height)
         expanded_notebook_bottom = self.app.sidebar_notebook.winfo_rooty() + self.app.sidebar_notebook.winfo_height()
         self.assertGreaterEqual(self.app.sidebar_save_panel.winfo_rooty() + 2, expanded_notebook_bottom)
+
+    def test_save_panel_returns_to_original_pack_slot_after_workspace_switch(self) -> None:
+        for workspace in ("处理", "PL荧光", "AB吸收", "采集"):
+            self.select_workspace(workspace)
+
+        self.root.update_idletasks()
+        panel = self.app.sidebar_save_panel
+        notebook = self.app.sidebar_notebook
+        self.assertEqual(panel.winfo_manager(), "pack")
+        pack_order = list(panel.master.pack_slaves())
+        self.assertLess(pack_order.index(panel), pack_order.index(notebook))
+        self.assertGreater(panel.winfo_height(), 0)
+        self.assertGreater(
+            self.app.save_button.winfo_height(),
+            0,
+            f"panel={panel.winfo_geometry()} row={self.app.save_button.master.winfo_geometry()}",
+        )
+        self.assertGreaterEqual(
+            panel.winfo_rooty() + 2,
+            notebook.winfo_rooty() + notebook.winfo_height(),
+        )
 
     def test_successful_single_capture_leaves_progress_green(self) -> None:
         self.app.single_in_progress = True
@@ -630,33 +654,47 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertEqual(line_widths, {self.app.plot.LINE_WIDTH, self.app.plot.ACTIVE_LINE_WIDTH})
         self.assertEqual(self.app.plot.ACTIVE_LINE_WIDTH, self.app.plot.LINE_WIDTH * 2)
         self.assertGreaterEqual(self.app.plot._plot_rect[0], 100)
-        legend_box = self.app.plot.canvas.bbox("plot_legend")
+        legend_canvas = self.app.plot.legend_canvas
+        self.assertIsNot(legend_canvas, self.app.plot.canvas)
+        self.assertIsNone(self.app.plot.canvas.bbox("plot_legend"))
+        legend_box = legend_canvas.bbox("plot_legend")
         self.assertIsNotNone(legend_box)
-        self.assertLessEqual(legend_box[2], self.app.plot._plot_rect[2])
-        first_legend_line = self.app.plot.canvas.find_withtag("legend_line_0")[0]
-        first_legend_text = self.app.plot.canvas.find_withtag("legend_text_0")[0]
-        self.assertEqual(
-            self.app.plot.canvas.itemcget(first_legend_text, "text"),
-            "spectrum-afga-aths-asth-fhsrt-afd1",
+        self.assertEqual(self.app.plot._plot_rect[1], 24)
+        plot_midpoint = self.app.plot._plot_rect
+        self.assertIsNotNone(
+            self.app.plot.data_at_pixel(
+                (plot_midpoint[0] + plot_midpoint[2]) / 2,
+                (plot_midpoint[1] + plot_midpoint[3]) / 2,
+            )
         )
+        first_legend_line = legend_canvas.find_withtag("legend_line_0")[0]
+        first_legend_text = legend_canvas.find_withtag("legend_text_0")[0]
+        first_legend_label = legend_canvas.itemcget(first_legend_text, "text")
+        self.assertTrue(first_legend_label.startswith("spe"))
+        self.assertTrue(first_legend_label.endswith("…"))
         self.assertLess(
-            self.app.plot.canvas.coords(first_legend_line)[2],
-            self.app.plot.canvas.bbox(first_legend_text)[0],
+            legend_canvas.coords(first_legend_line)[2],
+            legend_canvas.bbox(first_legend_text)[0],
         )
-        first_legend_box = self.app.plot.canvas.bbox("legend_text_0")
-        second_legend_box = self.app.plot.canvas.bbox("legend_text_1")
-        self.assertLess(first_legend_box[3], second_legend_box[1])
+        first_legend_box = legend_canvas.bbox("legend_text_0")
+        second_legend_box = legend_canvas.bbox("legend_text_1")
+        self.assertTrue(
+            first_legend_box[2] <= second_legend_box[0]
+            or second_legend_box[2] <= first_legend_box[0]
+            or first_legend_box[3] <= second_legend_box[1]
+            or second_legend_box[3] <= first_legend_box[1]
+        )
         long_name = "最新已保存 ｜" + "very-long-sample-name-" * 40
         self.app.plot.set_series(
             [PlotSeries(long_name, (390.0, 420.0), (3.0, 4.0), "#0f6cbd", active=True)],
             "强度 (counts)",
         )
         self.app.plot.draw()
-        truncated_legend = self.app.plot.canvas.itemcget(
-            self.app.plot.canvas.find_withtag("legend_text_0")[0],
+        truncated_legend = legend_canvas.itemcget(
+            legend_canvas.find_withtag("legend_text_0")[0],
             "text",
         )
-        self.assertTrue(truncated_legend.startswith("最新已保存 ｜"))
+        self.assertTrue(truncated_legend.startswith("最"))
         self.assertTrue(truncated_legend.endswith("…"))
         self.assertNotIn("…sample-name", truncated_legend)
         y_title_box = self.app.plot.canvas.bbox("y_axis_title")
@@ -682,6 +720,16 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.app.update_cursor_readout(890.4, 1245.5)
         self.assertEqual(self.app.cursor_position_var.get(), "890.40")
         self.assertEqual(self.app.cursor_var.get(), "强度: 1245.50")
+
+        self.app.device_info = replace(
+            self.app.simulation_spectrometer.connect().info,
+            saturation_intensity=63_000.0,
+        )
+        self.app.raw_spectrum = [63_000.0, 12_000.0]
+        self.app.refresh_plot()
+        self.assertEqual(self.app.saturation_var.get(), "饱和度: 100.0%")
+        self.assertEqual(self.app.plot._current_y_bounds, (0.0, 63_050.0))
+        self.assertFalse(self.app.plot.canvas.find_withtag("saturation_limit_line"))
 
     def test_crosshair_tool_places_and_drags_free_xy_marker(self) -> None:
         self.assertEqual(self.app.current_workspace(), "采集")

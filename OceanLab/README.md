@@ -1,6 +1,6 @@
 # OceanLab Spectroscopy Software
 
-OceanLab `1.0.1` is a lightweight spectroscopy acquisition and analysis application for Windows 10/11. It supports simulation, OceanDirect hardware acquisition, live processing, PL fluorescence overlays, and AB absorption analysis.
+OceanLab `2.0.2` is a lightweight spectroscopy acquisition and analysis application for 64-bit Windows 10/11. It supports simulation, OceanDirect hardware acquisition, live processing, PL fluorescence overlays, and AB absorption analysis.
 
 ## Quick Start
 

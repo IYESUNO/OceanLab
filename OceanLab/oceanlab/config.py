@@ -5,9 +5,11 @@ import tempfile
 from pathlib import Path
 
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "2.0.2"
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 TOOLBAR_ICON_DIR = PROJECT_DIR / "assets" / "oceanview_toolbar"
+APP_ICON_PATH = PROJECT_DIR / "assets" / "app_icons" / "oceanlab-icon-spectrum.ico"
+APP_USER_MODEL_ID = "OceanLab.Spectroscopy"
 PREFERENCES_FILE = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) / "OceanLab" / "settings.json"
 
 SIMULATION_SETTINGS = {

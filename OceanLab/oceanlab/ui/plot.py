@@ -18,8 +18,9 @@ class SpectrumPlot:
     PLOT_LEFT = 108
     Y_TITLE_X = 24
 
-    def __init__(self, canvas):
+    def __init__(self, canvas, legend_canvas=None):
         self.canvas = canvas
+        self.legend_canvas = legend_canvas
         self.wavelengths: list[float] = []
         self.values: list[float] = []
         self.series: list[PlotSeries] = []
@@ -42,6 +43,7 @@ class SpectrumPlot:
         self.crosshair_drag_preview_enabled = True
         self.limit_callback = None
         self._plot_rect: tuple[float, float, float, float] | None = None
+        self._legend_rects: list[tuple[float, float, float, float]] = []
         self._current_y_bounds: tuple[float, float] | None = None
         self._drag_start_x: int | None = None
         self._drag_start_bounds: tuple[float, float] | None = None
@@ -55,6 +57,7 @@ class SpectrumPlot:
         self._pending_canvas_size: tuple[int, int] | None = None
         self._resize_draw_after_id: str | None = None
         self._interaction_draw_after_id: str | None = None
+        self._legend_resize_after_id: str | None = None
         self._axis_tick_font = tkfont.Font(root=canvas, font=("Segoe UI", 9))
         self._x_title_font = tkfont.Font(root=canvas, font=("Microsoft YaHei UI", 10))
         self._y_title_font = tkfont.Font(root=canvas, font=("Microsoft YaHei UI", 10))
@@ -68,6 +71,8 @@ class SpectrumPlot:
         canvas.bind("<ButtonPress-1>", self.on_press)
         canvas.bind("<B1-Motion>", self.on_drag)
         canvas.bind("<ButtonRelease-1>", self.on_release)
+        if self.legend_canvas is not None:
+            self.legend_canvas.bind("<Configure>", self.on_legend_canvas_configure)
 
     def on_canvas_configure(self, event) -> None:
         """Coalesce real canvas resizes and ignore position-only configure events."""
@@ -88,6 +93,14 @@ class SpectrumPlot:
         if pending_size is None or pending_size == self._drawn_canvas_size:
             return
         self.draw()
+
+    def on_legend_canvas_configure(self, _event) -> None:
+        if self._legend_resize_after_id is None:
+            self._legend_resize_after_id = self.legend_canvas.after(28, self.flush_legend_resize)
+
+    def flush_legend_resize(self) -> None:
+        self._legend_resize_after_id = None
+        self.draw_legend_canvas()
 
     @staticmethod
     def nice_ticks(vmin: float, vmax: float, count: int = 5) -> list[float]:
@@ -164,6 +177,7 @@ class SpectrumPlot:
         x_label: str = "波长 (nm)",
         preferred_y_bounds: tuple[float, float] | None = None,
     ) -> None:
+        preferred_bounds_changed = preferred_y_bounds != self.preferred_y_bounds
         next_series = [item for item in series if item.visible]
         style_only = (
             len(next_series) == len(self.series)
@@ -185,6 +199,12 @@ class SpectrumPlot:
         self.x_label = x_label
         self.y_label = y_label
         self.preferred_y_bounds = preferred_y_bounds
+        if preferred_bounds_changed:
+            if preferred_y_bounds is None:
+                self.y_min = None
+                self.y_max = None
+            else:
+                self.y_min, self.y_max = preferred_y_bounds
         point_count = min(len(self.wavelengths), len(self.values))
         if point_count == 0:
             self.cursor_index = None
@@ -197,17 +217,18 @@ class SpectrumPlot:
 
     def update_series_styles(self) -> None:
         """Update colors and active emphasis without rebuilding plot geometry."""
+        legend_surface = self.legend_canvas or self.canvas
         for index, item in enumerate(self.series):
             width = self.ACTIVE_LINE_WIDTH if item.active else self.LINE_WIDTH
             self.canvas.itemconfigure(f"series_line_{index}", fill=item.color, width=width)
             self.canvas.itemconfigure(f"series_line_{index}", dash=item.dash or ())
-            self.canvas.itemconfigure(
+            legend_surface.itemconfigure(
                 f"legend_line_{index}",
                 fill=item.color,
                 width=width,
                 dash=item.dash or (),
             )
-            self.canvas.itemconfigure(
+            legend_surface.itemconfigure(
                 f"legend_text_{index}",
                 font=("Microsoft YaHei UI", 9, "bold") if item.active else ("Microsoft YaHei UI", 9),
             )
@@ -567,12 +588,139 @@ class SpectrumPlot:
         self.x_min, self.x_max = self.clamp_x_bounds(lo + shift, hi + shift)
         self.draw()
 
+    def _build_legend_layout(self, available_width: int, available_height: int):
+        legend_items = [(index, item) for index, item in enumerate(self.series) if item.name]
+        if not legend_items:
+            return None
+        normal_font = self._legend_font
+        active_font = self._legend_active_font
+        row_height = max(
+            24,
+            normal_font.metrics("linespace") + 8,
+            active_font.metrics("linespace") + 8,
+        )
+        available_width = max(1, int(available_width))
+        available_height = max(1, int(available_height))
+        # A normal legend floats outside the plot canvas in the application.
+        # Keep the common two/three-series history on one row and wrap only
+        # larger lists when the legend host is short or narrow.
+        row_hint = 1 if len(legend_items) <= 3 else max(
+            1,
+            min(3, int(max(1, (available_height - 8) // row_height))),
+        )
+        column_gap = 8
+        desired_columns = max(1, math.ceil(len(legend_items) / row_hint))
+        columns_that_fit = max(1, int((available_width + column_gap) // (96 + column_gap)))
+        column_count = min(desired_columns, columns_that_fit)
+        max_rows = max(1, math.ceil(len(legend_items) / column_count))
+        column_budget = max(
+            64,
+            int((available_width - column_gap * (column_count - 1)) / column_count),
+        )
+        # Leave a few pixels for Canvas text bounds and the right padding on
+        # older Tk builds used by the Win7 package.
+        max_text_width = max(32, column_budget - 62)
+
+        def display_name(item: PlotSeries) -> str:
+            font = active_font if item.active else normal_font
+            if font.measure(item.name) <= max_text_width:
+                return item.name
+            low, high = 1, len(item.name)
+            best = "…"
+            while low <= high:
+                keep = (low + high) // 2
+                candidate = item.name[:keep] + "…"
+                if font.measure(candidate) <= max_text_width:
+                    best = candidate
+                    low = keep + 1
+                else:
+                    high = keep - 1
+            return best
+
+        columns = []
+        for start in range(0, len(legend_items), max_rows):
+            column_entries = []
+            for series_index, item in legend_items[start : start + max_rows]:
+                label = display_name(item)
+                font = active_font if item.active else normal_font
+                column_entries.append((series_index, item, label, font.measure(label) + 58))
+            columns.append(column_entries)
+        legend_height = max(len(column) for column in columns) * row_height + 8
+        legend_width = min(
+            available_width + 16,
+            sum(max((entry[3] for entry in column), default=0) for column in columns)
+            + column_gap * max(0, len(columns) - 1)
+            + 16,
+        )
+        return columns, row_height, column_gap, legend_width, legend_height
+
+    def _render_legend(self, surface, layout, left: float, top: float, right: float, bottom: float) -> None:
+        if layout is None:
+            return
+        columns, row_height, column_gap, legend_width, legend_height = layout
+        legend_right = min(right, left + legend_width)
+        legend_bottom = min(bottom, top + legend_height)
+        surface.create_rectangle(
+            left,
+            top,
+            legend_right,
+            legend_bottom,
+            fill="#f8fbff",
+            outline="#cbd5e1",
+            tags="plot_legend",
+        )
+        if surface is self.canvas:
+            self._legend_rects.append((left, top, legend_right, legend_bottom))
+        legend_x = left + 8
+        normal_font = self._legend_font
+        active_font = self._legend_active_font
+        for column in columns:
+            column_width = max((entry[3] for entry in column), default=0)
+            for row, (series_index, item, label, _item_width) in enumerate(column):
+                y = top + 4 + row * row_height + row_height / 2
+                surface.create_line(
+                    legend_x + 2,
+                    y,
+                    legend_x + 26,
+                    y,
+                    fill=item.color,
+                    width=self.ACTIVE_LINE_WIDTH if item.active else self.LINE_WIDTH,
+                    dash=item.dash or (),
+                    tags=("plot_legend", "plot_legend_line", f"legend_line_{series_index}"),
+                )
+                surface.create_text(
+                    legend_x + 34,
+                    y,
+                    text=label,
+                    fill=self.AXIS,
+                    anchor="w",
+                    font=active_font if item.active else normal_font,
+                    tags=("plot_legend", "plot_legend_text", f"legend_text_{series_index}"),
+                )
+            legend_x += column_width + column_gap
+
+    def draw_legend_canvas(self) -> None:
+        if self.legend_canvas is None:
+            return
+        surface = self.legend_canvas
+        surface.delete("all")
+        self._legend_rects = []
+        width = max(1, surface.winfo_width())
+        height = max(1, surface.winfo_height())
+        layout = self._build_legend_layout(width - 16, height - 8)
+        if layout is None:
+            return
+        legend_height = layout[4]
+        legend_top = max(2, (height - legend_height) / 2)
+        self._render_legend(surface, layout, 8, legend_top, width - 8, height - 2)
+
     def draw(self) -> None:
         if self._interaction_draw_after_id is not None:
             self.canvas.after_cancel(self._interaction_draw_after_id)
             self._interaction_draw_after_id = None
         c = self.canvas
         c.delete("all")
+        self._legend_rects = []
         width = max(240, c.winfo_width())
         height = max(180, c.winfo_height())
         self._drawn_canvas_size = (max(1, c.winfo_width()), max(1, c.winfo_height()))
@@ -600,6 +748,7 @@ class SpectrumPlot:
                 fill="#64748b",
                 font=("Microsoft YaHei UI", 10),
             )
+            self.draw_legend_canvas()
             return
 
         x_bounds = self.current_x_bounds()
@@ -626,6 +775,11 @@ class SpectrumPlot:
         y_title_right = self.Y_TITLE_X + y_title_font.metrics("linespace") / 2
         left = max(self.PLOT_LEFT, int(y_title_right + 22 + widest_y_tick + 12))
         left = min(left, right - 100)
+
+        legend_layout = None
+        if self.legend_canvas is None:
+            legend_layout = self._build_legend_layout(right - left - 16, bottom - top)
+
         self._plot_rect = (left, top, right, bottom)
         c.create_rectangle(left, top, right, bottom, fill=self.BG, outline=self.BORDER)
 
@@ -695,74 +849,10 @@ class SpectrumPlot:
                     tags=("spectrum_line", f"series_line_{series_index}"),
                 )
 
-        legend_items = [item for item in self.series if item.name]
-        if legend_items:
-            normal_font = self._legend_font
-            active_font = self._legend_active_font
-            row_height = max(24, normal_font.metrics("linespace") + 8, active_font.metrics("linespace") + 8)
-            legend_y = top + 8
-            rows_per_column = max(1, int((bottom - legend_y - 8) // row_height))
-            max_text_width = max(320, min(720, int((right - left) * 0.68) - 58))
-
-            def display_name(item: PlotSeries) -> str:
-                font = active_font if item.active else normal_font
-                if font.measure(item.name) <= max_text_width:
-                    return item.name
-                low, high = 1, len(item.name)
-                best = "…"
-                while low <= high:
-                    keep = (low + high) // 2
-                    candidate = item.name[:keep] + "…"
-                    if font.measure(candidate) <= max_text_width:
-                        best = candidate
-                        low = keep + 1
-                    else:
-                        high = keep - 1
-                return best
-
-            legend_right = right - 12
-            for column_start in range(0, len(legend_items), rows_per_column):
-                column_items = legend_items[column_start : column_start + rows_per_column]
-                labels = [display_name(item) for item in column_items]
-                text_width = max(
-                    (active_font if item.active else normal_font).measure(label)
-                    for item, label in zip(column_items, labels)
-                )
-                column_width = text_width + 58
-                legend_left = legend_right - column_width
-                legend_bottom = legend_y + len(column_items) * row_height + 4
-                c.create_rectangle(
-                    legend_left,
-                    legend_y - 4,
-                    legend_right,
-                    legend_bottom,
-                    fill=self.BG,
-                    outline="#cbd5e1",
-                    tags="plot_legend",
-                )
-                for row, (item, label) in enumerate(zip(column_items, labels)):
-                    index = column_start + row
-                    y = legend_y + row * row_height + row_height / 2
-                    c.create_line(
-                        legend_left + 10,
-                        y,
-                        legend_left + 34,
-                        y,
-                        fill=item.color,
-                        width=self.ACTIVE_LINE_WIDTH if item.active else self.LINE_WIDTH,
-                        dash=item.dash or (),
-                        tags=("plot_legend", "plot_legend_line", f"legend_line_{index}"),
-                    )
-                    c.create_text(
-                        legend_left + 42,
-                        y,
-                        text=label,
-                        fill=self.AXIS,
-                        anchor="w",
-                        font=active_font if item.active else normal_font,
-                        tags=("plot_legend", "plot_legend_text", f"legend_text_{index}"),
-                    )
-                legend_right = legend_left - 8
+        if self.legend_canvas is not None:
+            self.draw_legend_canvas()
+        elif legend_layout:
+            self._render_legend(c, legend_layout, left, top, right, bottom)
 
         c.create_text(
             (left + right) / 2,
@@ -785,6 +875,12 @@ class SpectrumPlot:
         self.update_cursor_overlay()
         self.update_crosshair_overlay()
 
+    def _point_in_legend(self, x: float, y: float) -> bool:
+        return any(
+            left <= x <= right and top <= y <= bottom
+            for left, top, right, bottom in self._legend_rects
+        )
+
     def on_motion(self, event) -> None:
         return
 
@@ -798,6 +894,8 @@ class SpectrumPlot:
         if x_bounds is None:
             return None
         left, top, right, bottom = self._plot_rect
+        if not (left <= x <= right and top <= y <= bottom) or self._point_in_legend(x, y):
+            return None
         xlo, xhi = x_bounds
         ylo, yhi = self._current_y_bounds
         data_x = xlo + (x - left) / max(1.0, right - left) * (xhi - xlo)
@@ -807,8 +905,8 @@ class SpectrumPlot:
     def on_mousewheel(self, event) -> None:
         if self._plot_rect is None or not self.wavelengths:
             return
-        left, _top, right, _bottom = self._plot_rect
-        if not left <= event.x <= right:
+        left, top, right, bottom = self._plot_rect
+        if not (left <= event.x <= right and top <= event.y <= bottom):
             return
         bounds = self.current_x_bounds()
         if bounds is None:
@@ -822,7 +920,7 @@ class SpectrumPlot:
         if self._plot_rect is None or not self.wavelengths:
             return
         left, top, right, bottom = self._plot_rect
-        if left <= event.x <= right and top <= event.y <= bottom:
+        if left <= event.x <= right and top <= event.y <= bottom and not self._point_in_legend(event.x, event.y):
             if self.interaction_mode == "normal":
                 self._cursor_dragging = True
                 self.canvas.configure(cursor="sb_h_double_arrow")
