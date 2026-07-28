@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "2.0.0"
+    [string]$Version = "2.0.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +15,7 @@ $ReleaseRoot = Join-Path $PSScriptRoot "release"
 $ZipPath = Join-Path $ReleaseRoot "$BundleName.zip"
 $HashPath = Join-Path $ReleaseRoot "$BundleName.sha256.txt"
 $LegacyRuntimeRoot = Join-Path $LegacyRoot "runtime-vc142"
+$ExecutableName = "OceanLab-$Version.exe"
 
 function Assert-PathInsideRoot {
     param(
@@ -76,6 +77,7 @@ try {
         --workpath $WorkRoot `
         --specpath $SpecRoot `
         --version-file (Join-Path $PSScriptRoot "packaging\version_info.txt") `
+        --icon (Join-Path $PSScriptRoot "assets\app_icons\oceanlab-icon-spectrum.ico") `
         --add-data "$(Join-Path $PSScriptRoot 'assets');assets" `
         --hidden-import ctypes `
         --hidden-import getpass `
@@ -96,6 +98,62 @@ if (Test-Path -LiteralPath $BundleRoot) {
     Remove-Item -LiteralPath $BundleRoot -Recurse -Force
 }
 Move-Item -LiteralPath (Join-Path $DistRoot "OceanLab") -Destination $BundleRoot
+$BuiltExecutable = Join-Path $BundleRoot "OceanLab.exe"
+$VersionedExecutable = Join-Path $BundleRoot $ExecutableName
+Move-Item -LiteralPath $BuiltExecutable -Destination $VersionedExecutable
+
+# Windows Explorer caches executable icons aggressively by path and filename,
+# especially on Windows 7. A versioned filename avoids reusing the stale
+# OceanLab.exe cache entry when a new portable package is extracted.
+Add-Type -AssemblyName System.Drawing
+$NativeIconReader = Add-Type -MemberDefinition @"
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+public static extern uint PrivateExtractIcons(
+    string file,
+    int index,
+    int width,
+    int height,
+    IntPtr[] icons,
+    uint[] ids,
+    uint count,
+    uint flags
+);
+
+[DllImport("user32.dll")]
+public static extern bool DestroyIcon(IntPtr handle);
+"@ -Name "NativeIconReader" -Namespace "OceanLab.Build" -PassThru
+$IconHandles = New-Object IntPtr[] 1
+$IconIds = New-Object UInt32[] 1
+$ExtractedIconCount = $NativeIconReader::PrivateExtractIcons(
+    $VersionedExecutable,
+    0,
+    32,
+    32,
+    $IconHandles,
+    $IconIds,
+    1,
+    0
+)
+if ($ExtractedIconCount -ne 1 -or $IconHandles[0] -eq [IntPtr]::Zero) {
+    throw "Could not extract the icon resource from the packaged executable."
+}
+$EmbeddedIcon = [System.Drawing.Icon]::FromHandle($IconHandles[0]).Clone()
+try {
+    $EmbeddedBitmap = $EmbeddedIcon.ToBitmap()
+    try {
+        if ($EmbeddedBitmap.Width -ne 32 -or $EmbeddedBitmap.Height -ne 32) {
+            throw "Packaged executable does not contain the expected 32x32 icon resource."
+        }
+    }
+    finally {
+        $EmbeddedBitmap.Dispose()
+    }
+}
+finally {
+    $EmbeddedIcon.Dispose()
+    $NativeIconReader::DestroyIcon($IconHandles[0]) | Out-Null
+}
+
 $RuntimeFiles = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
 foreach ($RuntimeFile in $RuntimeFiles) {
     $RuntimePath = Join-Path $LegacyRuntimeRoot $RuntimeFile
@@ -105,6 +163,7 @@ foreach ($RuntimeFile in $RuntimeFiles) {
     Copy-Item -LiteralPath $RuntimePath -Destination $BundleRoot -Force
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "README.md") -Destination $BundleRoot
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Launch_OceanLab.cmd") -Destination $BundleRoot
 Copy-Item `
     -LiteralPath (Join-Path $PSScriptRoot "packaging\PORTABLE_README_WIN7.txt") `
     -Destination (Join-Path $BundleRoot "README_WIN7.txt")

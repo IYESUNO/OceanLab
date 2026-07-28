@@ -3,7 +3,7 @@ import queue
 import unittest
 from pathlib import Path
 
-from oceanlab.adapters.oceandirect import OceanDirectSpectrometer
+from oceanlab.adapters.oceandirect import OceanDirectSpectrometer, default_saturation_intensity
 from oceanlab.application.acquisition import AcquisitionService, CoalescingEventQueue
 from oceanlab.config import TRIGGER_MODE_TO_VALUE, TRIGGER_VALUE_TO_LABEL
 from oceanlab.domain.models import (
@@ -105,6 +105,11 @@ def make_adapter(device: FakeDevice) -> OceanDirectSpectrometer:
 
 
 class DevicePipelineTest(unittest.TestCase):
+    def test_known_qe65000_uses_usable_saturation_reference(self) -> None:
+        self.assertEqual(default_saturation_intensity("QE65000", 65_535.0), 63_000.0)
+        self.assertEqual(default_saturation_intensity("QE65 Pro", 65_535.0), 63_000.0)
+        self.assertEqual(default_saturation_intensity("FAKE", 65_535.0), 65_535.0)
+
     def test_unconfigured_start_is_rejected(self) -> None:
         events = CoalescingEventQueue()
         service = AcquisitionService(lambda: make_adapter(FakeDevice()), events)

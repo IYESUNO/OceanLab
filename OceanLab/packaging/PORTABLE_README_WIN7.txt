@@ -1,4 +1,4 @@
-OceanLab 2.0.0 Windows 7 x64 Legacy Edition
+OceanLab 2.0.1 Windows 7 x64 Legacy Edition
 ================================================
 
 Compatibility
@@ -17,8 +17,8 @@ for its DLL loading behavior. Windows 7 Service Pack 1 is still recommended.
 Getting Started
 ---------------
 1. Fully extract the ZIP archive. Do not run it from an archive preview window.
-2. Keep OceanLab.exe and all adjacent files and directories together.
-3. Double-click OceanLab.exe.
+2. Keep OceanLab-2.0.1.exe and all adjacent files and directories together.
+3. Double-click OceanLab-2.0.1.exe.
 4. Simulation mode does not require OceanDirect.
 
 OceanLab automatically checks C:\OceanDirect and the common 64-bit
@@ -33,7 +33,7 @@ spectrometer. Compatibility with a physical instrument must be validated on
 the actual Windows 7 computer.
 
 The Windows 7-compatible Microsoft VC142 14.29 runtime DLLs required by
-OceanDirect.dll are included beside OceanLab.exe and loaded application-locally.
+OceanDirect.dll are included beside the OceanLab executable and loaded application-locally.
 No separate Visual C++ Redistributable installation is normally required.
 
 OceanLab does not modify instrument firmware, EEPROM, or calibration data.
@@ -47,7 +47,7 @@ Runtime log:   %TEMP%\OceanLab\OceanLab.log
 
 Build Information
 -----------------
-Application: OceanLab 2.0.0
+Application: OceanLab 2.0.1
 Runtime:     CPython 3.7.9 x64
 Packager:    PyInstaller 5.13.2
 Target:      Windows 7 x64 Legacy

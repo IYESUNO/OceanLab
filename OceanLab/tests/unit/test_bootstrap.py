@@ -8,9 +8,13 @@ from unittest import mock
 
 from oceanlab import cli
 from oceanlab.bootstrap import configure_log_file
+from oceanlab.config import APP_ICON_PATH
 
 
 class BootstrapCompatibilityTest(unittest.TestCase):
+    def test_application_icon_asset_exists(self) -> None:
+        self.assertTrue(APP_ICON_PATH.is_file(), APP_ICON_PATH)
+
     def test_windowed_version_check_does_not_require_stdout(self) -> None:
         with mock.patch.object(cli.sys, "stdout", None):
             self.assertEqual(cli.main(["--version"]), 0)

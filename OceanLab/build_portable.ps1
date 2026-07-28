@@ -29,6 +29,7 @@ New-Item -ItemType Directory -Force -Path $DistRoot, $WorkRoot, $SpecRoot, $Rele
     --workpath $WorkRoot `
     --specpath $SpecRoot `
     --version-file (Join-Path $PSScriptRoot "packaging\version_info.txt") `
+    --icon (Join-Path $PSScriptRoot "assets\app_icons\oceanlab-icon-spectrum.ico") `
     --add-data "$(Join-Path $PSScriptRoot 'assets');assets" `
     --hidden-import ctypes `
     --hidden-import getpass `
@@ -41,6 +42,7 @@ if (Test-Path -LiteralPath $BundleRoot) {
 }
 Move-Item -LiteralPath (Join-Path $DistRoot "OceanLab") -Destination $BundleRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "README.md") -Destination $BundleRoot
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Launch_OceanLab.cmd") -Destination $BundleRoot
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "packaging\PORTABLE_README.txt") -Destination $BundleRoot
 
 $ZipPath = Join-Path $ReleaseRoot "$BundleName.zip"

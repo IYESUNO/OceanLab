@@ -155,9 +155,11 @@ class OceanLabApp:
         self._show_single_capture_history = False
 
         preferences = self.load_preferences()
-        save_format = preferences.get("save_format", SAVE_FORMAT_CSV)
+        # TXT matches the OceanView-compatible format expected by the Win7
+        # deployment.  Keep an explicitly saved legacy CSV preference intact.
+        save_format = preferences.get("save_format", SAVE_FORMAT_TXT)
         if save_format not in SAVE_FORMAT_OPTIONS:
-            save_format = SAVE_FORMAT_CSV
+            save_format = SAVE_FORMAT_TXT
         suffix_mode = preferences.get("suffix_mode", SAVE_SUFFIX_TIME)
         if suffix_mode not in (SAVE_SUFFIX_TIME, SAVE_SUFFIX_SEQUENCE, SAVE_SUFFIX_NONE):
             suffix_mode = SAVE_SUFFIX_TIME
@@ -330,7 +332,7 @@ class OceanLabApp:
         self.sdk_footer_var = tk.StringVar(
             value=f"SDK: {self.sdk_home}" if self.sdk_validator(self.sdk_home) else "SDK: 未检测到 OceanDirect"
         )
-        self.saturation_var = tk.StringVar(value="满量程: —")
+        self.saturation_var = tk.StringVar(value="饱和度: —")
         self.settings_state_var = tk.StringVar(value="连接仪器或进入模拟模式后可应用参数")
         self.baseline_state_var = tk.StringVar(value="暗谱：未记录    参考谱：未记录")
         self.dark_state_var = tk.StringVar(value="共享暗谱：未记录")
@@ -994,6 +996,19 @@ class OceanLabApp:
             if mode:
                 self.plot_tool_buttons[mode] = button
 
+        # Keep the legend in the spare toolbar area.  It should never cover
+        # spectral data or consume any of the plot's x/y drawing rectangle.
+        self.plot_legend_canvas = self.tk.Canvas(
+            toolbar,
+            width=1,
+            height=48 if self.compact_layout else 58,
+            background="#ffffff",
+            highlightthickness=1,
+            highlightbackground="#cbd5e1",
+            borderwidth=0,
+        )
+        self.plot_legend_canvas.pack(side="left", fill="both", expand=True, padx=(6, 0))
+
         metrics = self.ttk.Frame(main, style="Card.TFrame")
         self.metrics_bar = metrics
         metrics.pack(fill="x", padx=2, pady=(0, 7))
@@ -1060,7 +1075,7 @@ class OceanLabApp:
 
         canvas = self.tk.Canvas(main, highlightthickness=0, background=SpectrumPlot.BG)
         canvas.pack(fill="both", expand=True)
-        self.plot = SpectrumPlot(canvas)
+        self.plot = SpectrumPlot(canvas, legend_canvas=self.plot_legend_canvas)
         if self.compact_layout:
             self.plot.PLOT_LEFT = 82
             self.plot.Y_TITLE_X = 18
@@ -1197,7 +1212,15 @@ class OceanLabApp:
         workspace = self.current_workspace()
         if workspace == "采集":
             if not self.sidebar_save_panel.winfo_manager():
-                self.sidebar_save_panel.pack(side="bottom", fill="x", padx=1, pady=(0, 1))
+                # The notebook is expandable.  Reinsert the save panel before
+                # it so Tk's pack order remains stable after a tab switch.
+                self.sidebar_save_panel.pack(
+                    side="bottom",
+                    fill="x",
+                    before=self.sidebar_notebook,
+                    padx=1,
+                    pady=(0, 1),
+                )
             self.save_button.configure(
                 state="normal" if self.controls_enabled else "disabled",
                 style="Saved.TButton" if self.save_verified else "Primary.TButton",
@@ -3365,8 +3388,8 @@ class OceanLabApp:
 
     def preferred_plot_y_bounds(self, label: str) -> tuple[float, float] | None:
         if "counts" in label.lower():
-            maximum = self.device_info.max_intensity if self.device_info and self.device_info.max_intensity > 0 else 65535.0
-            return 0.0, float(maximum)
+            saturation = self.saturation_limit()
+            return 0.0, float(saturation + 50.0)
         if label == "透过率 (%)":
             return 0.0, 100.0
         if label == "吸光度 (A)":
@@ -3374,6 +3397,17 @@ class OceanLabApp:
         if label == "归一化强度":
             return 0.0, 1.05
         return None
+
+    def saturation_limit(self) -> float:
+        """Return the detector's usable saturation reference in counts."""
+        if self.device_info is None:
+            return 65_535.0
+        candidate = self.device_info.saturation_intensity
+        if candidate is not None and math.isfinite(candidate) and candidate > 0:
+            return float(candidate)
+        if self.device_info.max_intensity > 0 and math.isfinite(self.device_info.max_intensity):
+            return float(self.device_info.max_intensity)
+        return 65_535.0
 
     def refresh_plot(self) -> None:
         if not hasattr(self, "plot"):
@@ -3431,7 +3465,13 @@ class OceanLabApp:
                 self.plot.set_empty_message("等待光谱数据", "连接仪器或进入模拟模式，然后开始连续采集或执行单次采集")
                 values, label = self.processed_spectrum()
                 x_values, x_label, _x_unit = self.plot_x_values()
-                self.plot.set_data(x_values, values, label, x_label, self.preferred_plot_y_bounds(label))
+                self.plot.set_data(
+                    x_values,
+                    values,
+                    label,
+                    x_label,
+                    self.preferred_plot_y_bounds(label),
+                )
         self.update_single_history_warning(workspace)
         self.update_cursor_control_state()
         finite = [(x, y) for x, y in zip(self.plot.wavelengths, self.plot.values) if math.isfinite(y)]
@@ -3460,9 +3500,10 @@ class OceanLabApp:
             self.frame_value_var.set("—")
 
         raw_values = [value for value in self.raw_spectrum if math.isfinite(value)]
-        if not historical and raw_values and self.device_info and self.device_info.max_intensity > 0:
-            ratio = max(raw_values) / self.device_info.max_intensity * 100.0
-            self.saturation_var.set(f"满量程: {ratio:.1f}%")
+        saturation_limit = self.saturation_limit()
+        if not historical and raw_values and saturation_limit > 0:
+            ratio = max(raw_values) / saturation_limit * 100.0
+            self.saturation_var.set(f"饱和度: {ratio:.1f}%")
             if ratio >= 95:
                 self.saturation_label.configure(style="MetricDanger.TLabel")
             elif ratio >= 80:
@@ -3470,7 +3511,7 @@ class OceanLabApp:
             else:
                 self.saturation_label.configure(style="MetricSafe.TLabel")
         else:
-            self.saturation_var.set("满量程: —")
+            self.saturation_var.set("饱和度: —")
             self.saturation_label.configure(style="Metric.TLabel")
 
     def current_fps(self) -> float:

@@ -1,6 +1,6 @@
 # OceanLab Spectroscopy Software — Windows 7 Branch
 
-OceanLab `2.0.0` on this branch is the dedicated 64-bit Windows 7 compatibility edition. It preserves the complete acquisition, processing, PL fluorescence, and AB absorption feature set while using an isolated legacy Python toolchain. The standard Windows 10/11 source and release remain on the `win64` branch.
+OceanLab `2.0.1` on this branch is the dedicated 64-bit Windows 7 compatibility edition. It preserves the complete acquisition, processing, PL fluorescence, and AB absorption feature set while using an isolated legacy Python toolchain. The standard Windows 10/11 source and release remain on the `win64` branch.
 
 ## Quick Start
 
@@ -53,10 +53,10 @@ The standard portable package targets Windows 10/11. A separate, isolated toolch
 ```powershell
 cd OceanLab
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup_win7_toolchain.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_win7_legacy.ps1 -Version "2.0.0"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_win7_legacy.ps1 -Version "2.0.1"
 ```
 
-The setup script installs Python 3.7.9 and PyInstaller 5.13.2 only under the repository's ignored `.build-win7` directory. It does not add Python to the system `PATH`. Python 3.7 avoids Python 3.8's Windows 7 dependency on KB2533623. The output is written to `release\OceanLab-2.0.0-win7-x64-legacy.zip`.
+The setup script installs Python 3.7.9 and PyInstaller 5.13.2 only under the repository's ignored `.build-win7` directory. It does not add Python to the system `PATH`. Python 3.7 avoids Python 3.8's Windows 7 dependency on KB2533623. The output is written to `release\OceanLab-2.0.1-win7-x64-legacy.zip`.
 
 Python 3.7 is end-of-life, so the Legacy package is intended only for a required offline or controlled instrument computer. Physical OceanDirect compatibility must be validated on the actual Windows 7 system.
 

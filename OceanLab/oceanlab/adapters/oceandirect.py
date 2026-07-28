@@ -22,6 +22,22 @@ from ..domain.models import (
 
 DEFAULT_SDK_HOME = Path(r"C:\OceanDirect")
 _WINDOWS_DLL_HANDLES: list[Any] = []
+QE65000_SATURATION_INTENSITY = 63_000.0
+
+
+def _model_key(model: str) -> str:
+    return "".join(character for character in str(model).upper() if character.isalnum())
+
+
+def default_saturation_intensity(model: str, max_intensity: float) -> float:
+    """Return the usable saturation reference for a known detector family."""
+    maximum = float(max_intensity)
+    if maximum <= 0:
+        return maximum
+    key = _model_key(model)
+    if "QE65000" in key or "QE65PRO" in key:
+        return min(maximum, QE65000_SATURATION_INTENSITY)
+    return maximum
 
 
 def normalize_sdk_home(value: str | os.PathLike[str]) -> Path:
@@ -186,18 +202,42 @@ class OceanDirectSpectrometer:
             self.device = self.api.open_device(self.device_id)
             wavelengths = tuple(float(value) for value in self.device.get_wavelengths())
             capabilities, optional = self._read_optional_settings()
+            model = str(self.device.get_device_type())
+            max_intensity = float(self.device.get_max_intensity())
+            saturation_intensity = default_saturation_intensity(model, max_intensity)
+            advanced = getattr(self.device, "Advanced", None)
+            saturation_reader = getattr(advanced, "get_autonull_saturation_level", None)
+            if callable(saturation_reader):
+                try:
+                    reported_saturation = float(saturation_reader())
+                except Exception:
+                    reported_saturation = 0.0
+                # The legacy QE65000 saturation reference is lower than its
+                # nominal 16-bit maximum.  Prefer a usable SDK value for
+                # newer devices, but do not replace the QE65000 fallback
+                # with a generic 65535 response.
+                if (
+                    reported_saturation > 0
+                    and math.isfinite(reported_saturation)
+                    and not (
+                        ("QE65000" in _model_key(model) or "QE65PRO" in _model_key(model))
+                        and reported_saturation >= max_intensity * 0.999
+                    )
+                ):
+                    saturation_intensity = min(max_intensity, reported_saturation)
             info = DeviceInfo(
                 device_id=self.device_id,
                 serial=str(self.device.get_serial_number()),
-                model=str(self.device.get_device_type()),
+                model=model,
                 pixels=int(self.device.get_formatted_spectrum_length()),
                 wavelength_min=wavelengths[0],
                 wavelength_max=wavelengths[-1],
                 integration_min_us=int(self.device.get_minimum_integration_time()),
                 integration_max_us=int(self.device.get_maximum_integration_time()),
                 integration_increment_us=int(self.device.get_integration_time_increment()),
-                max_intensity=float(self.device.get_max_intensity()),
+                max_intensity=max_intensity,
                 capabilities=capabilities,
+                saturation_intensity=saturation_intensity,
             )
             settings = AcquisitionRequest(
                 integration_us=int(self.device.get_integration_time()),
