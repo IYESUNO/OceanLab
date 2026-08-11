@@ -10,6 +10,7 @@ from oceanlab.adapters.spectrum_files import DelimitedSpectrumImporter
 from oceanlab.application.absorbance import HistoricalAbsorbanceService
 from oceanlab.application.pl_results import PlResultService, turbo_color
 from oceanlab.domain.models import BaselineSet, SpectrumContext, SpectrumFrame
+from oceanlab.domain.result_processing import PHOTON_ENERGY_EV_NM
 from oceanlab.ports.exporter import ExportRequest
 
 
@@ -168,7 +169,7 @@ class SpectrumImportAndResultsTest(unittest.TestCase):
     def test_absorbance_multiple_samples_with_optional_dark(self) -> None:
         service = HistoricalAbsorbanceService(self.importer)
         sample = self.write_two_column("sample.csv", (6.0, 11.0, 21.0))
-        sample_two = self.write_two_column("sample-two.csv", (3.0, 6.0, 12.0))
+        sample_two = self.write_two_column("sample-two.csv", (21.0, 41.0, 81.0))
         dark = self.write_two_column("dark.csv", (1.0, 1.0, 1.0))
         reference = self.write_two_column("reference.csv", (11.0, 21.0, 41.0))
         service.load_samples((sample, sample_two))
@@ -182,6 +183,14 @@ class SpectrumImportAndResultsTest(unittest.TestCase):
         self.assertEqual(transmission.series[0].values, (50.0, 50.0, 50.0))
         self.assertEqual(transmission.invalid_counts[0][1], 0)
         self.assertAlmostEqual(absorbance.series[0].values[0], 0.3010299957)
+        tauc = service.build_plot(absorbance=True, tauc=True)
+        expected_energy = PHOTON_ENERGY_EV_NM / 350.0
+        self.assertAlmostEqual(tauc.series[0].values[0], (0.3010299957 * expected_energy) ** 2)
+        self.assertEqual(tauc.invalid_counts[0][1], 0)
+        negative_absorbance = -math.log10(2.0)
+        self.assertAlmostEqual(tauc.series[1].values[0], (negative_absorbance * expected_energy) ** 2)
+        self.assertEqual(tauc.invalid_counts[1][1], 0)
+        self.assertTrue(all(math.isfinite(value) for value in tauc.series[1].values))
         service.set_active(service.entries[0].entry_id)
         self.assertTrue(service.build_plot(True).series[0].active)
         service.clear_dark()

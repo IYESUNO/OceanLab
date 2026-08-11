@@ -7,7 +7,7 @@ def build_processing_workspace(app, parent) -> None:
     app.ttk.Label(parent, text="实时光谱处理", style="Section.TLabel").pack(anchor="w")
     app.ttk.Label(
         parent,
-        text="处理采集页当前光谱；记录暗谱和 AB 参考后可实时显示透过率或吸光度。",
+        text="处理采集页当前光谱；记录暗谱和 AB 参考后可实时显示透过率、吸光度或 Tauc 结果。",
         style="Hint.TLabel",
         wraplength=500,
     ).pack(anchor="w", pady=(4, 10))
@@ -36,7 +36,7 @@ def build_processing_workspace(app, parent) -> None:
         parent,
         textvariable=app.mode_var,
         state="readonly",
-        values=("原始强度", "暗谱扣除", "峰值归一化", "透过率 (%)", "吸光度 (A)"),
+        values=("原始强度", "暗谱扣除", "峰值归一化", "透过率 (%)", "吸光度 (A)", "Tauc 计算结果"),
     )
     app.mode_combo.pack(fill="x", pady=(0, 10))
     app.mode_combo.bind("<<ComboboxSelected>>", app.on_processing_mode_changed)
@@ -150,13 +150,19 @@ def build_absorbance_workspace(app, parent) -> None:
     app.ab_dark_file_button.pack(side="left", fill="x", expand=True, padx=(6, 0))
     reference_status_row = app.ttk.Frame(parent, style="Card.TFrame")
     reference_status_row.pack(fill="x", pady=(7, 0))
+    app.ab_reference_clear_button = app.ttk.Button(
+        reference_status_row,
+        text="清除参考",
+        command=app.clear_ab_reference,
+        width=10,
+    )
+    app.ab_reference_clear_button.pack(side="right", padx=(6, 0))
     app.ttk.Label(
         reference_status_row,
         textvariable=app.ab_reference_status_var,
         style="Hint.TLabel",
-        wraplength=390,
+        wraplength=350,
     ).pack(side="left", fill="x", expand=True)
-    app.ttk.Button(reference_status_row, text="清除参考", command=app.clear_ab_reference).pack(side="right", padx=(6, 0))
     dark_status_row = app.ttk.Frame(parent, style="Card.TFrame")
     dark_status_row.pack(fill="x", pady=(2, 0))
     app.ttk.Label(
@@ -174,7 +180,7 @@ def build_absorbance_workspace(app, parent) -> None:
     app.ab_mode_combo = app.ttk.Combobox(
         mode_row,
         textvariable=app.ab_mode_var,
-        values=("透过率 (%)", "吸光度 (A)"),
+        values=("透过率 (%)", "吸光度 (A)", "Tauc 计算结果"),
         state="readonly",
         width=16,
     )
@@ -182,6 +188,27 @@ def build_absorbance_workspace(app, parent) -> None:
     app.ab_mode_combo.bind("<<ComboboxSelected>>", app.on_ab_display_changed)
     app.ab_clear_button = app.ttk.Button(mode_row, text="清空全部", command=app.clear_historical_ab)
     app.ab_clear_button.pack(side="right", padx=(0, 8))
+
+    display_row = app.ttk.Frame(parent, style="Card.TFrame")
+    display_row.pack(fill="x", pady=(6, 0))
+    app.ttk.Label(display_row, text="显示", style="Card.TLabel").pack(side="left")
+    axis_buttons = app.ttk.Frame(display_row, style="Card.TFrame")
+    axis_buttons.pack(side="right")
+    app.ab_wavelength_axis_button = app.ttk.Button(
+        axis_buttons,
+        text="波长 nm",
+        command=lambda: app.set_ab_x_axis("波长 (nm)"),
+        width=10,
+    )
+    app.ab_wavelength_axis_button.pack(side="left")
+    app.ab_energy_axis_button = app.ttk.Button(
+        axis_buttons,
+        text="光子能量 eV",
+        command=lambda: app.set_ab_x_axis("光子能量 (eV)"),
+        width=13,
+    )
+    app.ab_energy_axis_button.pack(side="left", padx=(6, 0))
+    app.update_ab_axis_button_styles()
     app.ttk.Label(parent, textvariable=app.ab_result_status_var, style="Hint.TLabel", wraplength=500).pack(
         anchor="w", fill="x", pady=(6, 5)
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import tempfile
 import time
 import tkinter as tk
@@ -16,6 +17,7 @@ from oceanlab.adapters.oceandirect import is_oceandirect_home, normalize_sdk_hom
 from oceanlab.adapters.simulation import SimulatedSpectrometer
 from oceanlab.bootstrap import service_factory
 from oceanlab.config import SAVE_FORMAT_TXT, SAVE_SUFFIX_NONE, SAVE_SUFFIX_SEQUENCE, SAVE_SUFFIX_TIME
+from oceanlab.domain.result_processing import photon_energy_ev
 from oceanlab.domain.results import PlotSeries
 from oceanlab.ui.app import OceanLabApp
 
@@ -326,7 +328,7 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
     def test_integration_position_and_composed_name(self) -> None:
         self.assertEqual(self.app.name_prefix_var.get(), "")
         self.assertEqual(self.app.base_name_var.get(), "spectrum")
-        self.assertEqual(self.app.name_suffix_var.get(), "{integration}-{averages}-{number}")
+        self.assertEqual(self.app.name_suffix_var.get(), "{integration}-{averages}")
         self.assertEqual(self.app.position_var.get(), "")
         self.app.integration_unit_var.set("ms")
         self.app._integration_unit_last = "ms"
@@ -356,7 +358,7 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.app.position_var.set("02")
         self.assertEqual(
             self.app.compose_save_base_name(),
-            "KCaCl3Eu-P2.0GPa-L360nm-100ms-3times-02",
+            "KCaCl3Eu-P2.0GPa02-L360nm-100ms-3times",
         )
         self.app.position_var.set("")
         self.assertEqual(
@@ -364,7 +366,8 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
             "KCaCl3Eu-P2.0GPa-L360nm-100ms-3times",
         )
         self.app.name_suffix_var.set("L360nm-{number}-100ms")
-        self.assertEqual(self.app.compose_save_base_name(), "KCaCl3Eu-P2.0GPa-L360nm-100ms")
+        self.app.position_var.set("02")
+        self.assertEqual(self.app.compose_save_base_name(), "KCaCl3Eu-P2.0GPa02-L360nm-100ms")
 
         original_device = self.app.device_info
         self.app.device_info = SimpleNamespace(serial="TESTSERIAL")
@@ -528,11 +531,11 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
             self.assertEqual(self.app.save_current_variable_entry.get(), long_base)
             self.assertEqual(
                 self.app.save_name_suffix_entry.get(),
-                "{integration}-{averages}-{number}",
+                "{integration}-{averages}",
             )
             reset_preview = self.root.getvar(variable_name)
-            self.assertIn(f"KeepPrefix-{long_base}-", reset_preview)
-            self.assertIn("-1times-07_", reset_preview)
+            self.assertIn(f"KeepPrefix-{long_base}07-", reset_preview)
+            self.assertIn("-1times_", reset_preview)
         finally:
             self.app.save_dialog.destroy()
             self.app.save_dialog = None
@@ -806,6 +809,51 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
             draw_mock.assert_not_called()
         self.assertTrue(self.app.plot.canvas.find_withtag("zoom_selection"))
 
+    def test_zoomed_axes_preserve_precision_pairs_edges_and_nan_gaps(self) -> None:
+        wavelengths = [500.0 + index * 0.02 for index in range(21)]
+        values = [float(index * index) for index in range(21)]
+        self.app.plot.set_data(wavelengths, values, "强度 (counts)", "波长 (nm)")
+        original_series = self.app.plot.series[0]
+        self.app.plot.x_min, self.app.plot.x_max = 500.10, 500.22
+        self.app.plot.draw()
+        nm_labels = [
+            self.app.plot.canvas.itemcget(item_id, "text")
+            for item_id in self.app.plot.canvas.find_withtag("x_tick_label")
+        ]
+        self.assertEqual(len(nm_labels), len(set(nm_labels)))
+        self.assertTrue(all("." in label for label in nm_labels))
+        self.assertEqual(self.app.plot.series[0].wavelengths, tuple(wavelengths))
+        self.assertEqual(self.app.plot.series[0].values, tuple(values))
+        edge_points = self.app.plot.visible_series_points(
+            original_series,
+            500.10,
+            500.22,
+            include_neighbors=True,
+            finite_only=False,
+        )
+        self.assertLess(edge_points[0][0], 500.10)
+        self.assertGreater(edge_points[-1][0], 500.22)
+        self.assertTrue(all(y == values[wavelengths.index(x)] for x, y in edge_points))
+
+        energies = [1.80 + index * 0.01 for index in range(41)]
+        energy_values = [float(index) for index in range(len(energies))]
+        self.app.plot.set_data(energies, energy_values, "吸光度 (A)", "光子能量 (eV)")
+        self.app.plot.x_min, self.app.plot.x_max = 1.92, 2.08
+        self.app.plot.draw()
+        ev_labels = [
+            self.app.plot.canvas.itemcget(item_id, "text")
+            for item_id in self.app.plot.canvas.find_withtag("x_tick_label")
+        ]
+        self.assertEqual(len(ev_labels), len(set(ev_labels)))
+        self.assertTrue(all("." in label for label in ev_labels))
+
+        nan = float("nan")
+        self.app.plot.set_data([0, 1, 2, 3, 4], [0, 1, nan, 3, 4], "吸光度 (A)")
+        self.app.plot.x_min = self.app.plot.x_max = None
+        self.app.plot.draw()
+        self.assertTrue(math.isnan(self.app.plot.series[0].values[2]))
+        self.assertEqual(len(self.app.plot.canvas.find_withtag("spectrum_line")), 2)
+
     def test_baselines_are_invalidated_when_acquisition_context_changes(self) -> None:
         self.app.enter_simulation_mode()
         self.app.capture_dark()
@@ -843,7 +891,17 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertEqual(self.app.edc_check.cget("text"), "启用暗噪声校正")
         self.assertEqual(self.app.nl_check.cget("text"), "启用非线性校正")
         self.assertEqual(self.app.ab_dark_file_button.cget("text"), "选择暗谱（可选）")
+        self.assertIn("Tauc 计算结果", self.app.ab_mode_combo.cget("values"))
+        self.assertEqual(self.app.ab_wavelength_axis_button.cget("text"), "波长 nm")
+        self.assertEqual(self.app.ab_energy_axis_button.cget("text"), "光子能量 eV")
+        self.app.ab_reference_status_var.set("很长的文件名-" * 20)
+        self.root.update_idletasks()
+        self.assertGreaterEqual(
+            self.app.ab_reference_clear_button.winfo_width(),
+            self.app.ab_reference_clear_button.winfo_reqwidth(),
+        )
         self.assertIn("吸光度 (A)", self.app.mode_combo.cget("values"))
+        self.assertIn("Tauc 计算结果", self.app.mode_combo.cget("values"))
         self.assertEqual(self.app.processing_reference_button.cget("text"), "记录 AB 参考")
         self.assertEqual(str(self.app.pl_turbo_check.cget("state")), "normal")
 
@@ -940,6 +998,12 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertTrue(self.app.plot.values)
         self.assertAlmostEqual(self.app.plot.values[0], 0.3010299957)
         self.assertIn("参考谱：已记录", self.app.baseline_state_var.get())
+        self.app.mode_var.set("Tauc 计算结果")
+        self.app.refresh_plot()
+        self.assertEqual(self.app.plot.y_label, "Tauc (A·eV)²")
+        self.assertEqual(self.app.plot.x_label, "波长 (nm)")
+        expected_tauc = (0.3010299957 * photon_energy_ev(self.app.wavelengths[0])) ** 2
+        self.assertAlmostEqual(self.app.plot.values[0], expected_tauc)
         self.app.clear_dark()
         self.assertIn("暗谱：未记录", self.app.baseline_state_var.get())
         self.assertEqual(self.app.dark_button.cget("style"), "TButton")
@@ -979,7 +1043,7 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
     def test_historical_ab_triplet_displays_absorbance(self) -> None:
         paths = []
         for name, values in (
-            ("sample", (6, 11, 21)),
+            ("sample", (6, 16, 31)),
             ("dark", (1, 1, 1)),
             ("reference", (11, 21, 41)),
         ):
@@ -991,7 +1055,9 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
             paths.append(path)
         self.app.historical_absorbance_service.load_samples((paths[0],))
         self.app.historical_absorbance_service.load_dark(paths[1])
-        self.app.historical_absorbance_service.load_reference(paths[2])
+        with mock.patch("tkinter.filedialog.askopenfilename", return_value=str(paths[2])):
+            self.app.select_ab_reference_file()
+        self.assertEqual(self.app.ab_reference_status_var.get(), paths[2].name)
         self.app.ab_active_var.set(self.app.historical_absorbance_service.active_id or "")
         self.app.rebuild_ab_file_list()
         self.assertEqual(self.app.ab_samples_button.cget("style"), "Selected.TButton")
@@ -1001,6 +1067,20 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertEqual(self.app.plot.y_label, "吸光度 (A)")
         self.assertAlmostEqual(self.app.plot.values[0], 0.3010299957)
         self.assertIn("无效点共 0", self.app.ab_result_status_var.get())
+        wavelength_pairs = list(zip(self.app.plot.wavelengths, self.app.plot.values))
+        self.app.set_ab_x_axis("光子能量 (eV)")
+        self.assertEqual(self.app.plot.x_label, "光子能量 (eV)")
+        self.assertLess(self.app.plot.wavelengths[0], self.app.plot.wavelengths[-1])
+        expected_energy_pairs = sorted((photon_energy_ev(x), y) for x, y in wavelength_pairs)
+        self.assertEqual(len(self.app.plot.wavelengths), len(expected_energy_pairs))
+        for actual, expected in zip(zip(self.app.plot.wavelengths, self.app.plot.values), expected_energy_pairs):
+            self.assertAlmostEqual(actual[0], expected[0])
+            self.assertAlmostEqual(actual[1], expected[1])
+        self.assertEqual(self.app.cursor_unit_var.get(), "eV")
+        self.app.ab_mode_var.set("Tauc 计算结果")
+        self.app.on_ab_display_changed()
+        self.assertEqual(self.app.plot.y_label, "Tauc (A·eV)²")
+        self.assertAlmostEqual(self.app.plot.values[-1], (0.3010299957 * self.app.plot.wavelengths[-1]) ** 2)
 
     def test_workspace_display_preferences_persist_without_file_paths(self) -> None:
         self.select_workspace("PL荧光")
@@ -1009,6 +1089,7 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.app.on_pl_display_changed()
         self.app.pl_turbo_var.set(True)
         self.app.ab_mode_var.set("透过率 (%)")
+        self.app.ab_x_axis_var.set("光子能量 (eV)")
         self.app.save_preferences()
         saved = self.app.load_preferences()
         self.assertEqual(saved["workspace"], "PL荧光")
@@ -1016,6 +1097,7 @@ class IntegrationPresetSmokeTest(unittest.TestCase):
         self.assertTrue(saved["pl_normalize"])
         self.assertTrue(saved["pl_turbo"])
         self.assertEqual(saved["ab_mode"], "透过率 (%)")
+        self.assertEqual(saved["ab_x_axis"], "光子能量 (eV)")
         self.assertNotIn("pl_files", saved)
 
 

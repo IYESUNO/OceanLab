@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from ..domain.result_processing import calculate_absorbance, wavelength_axes_match
+from ..domain.result_processing import calculate_absorbance, calculate_tauc_direct, wavelength_axes_match
 from ..domain.results import AbsorbanceDataset, ImportedSpectrum, PlotSeries
 from ..ports.spectrum_importer import SpectrumImporter
 from .pl_results import ImportBatchResult, PlResultService
@@ -69,7 +69,7 @@ class HistoricalAbsorbanceService:
         self.reference = None
         self.dark = None
 
-    def build_plot(self, absorbance: bool) -> AbsorbancePlotResult:
+    def build_plot(self, absorbance: bool, tauc: bool = False) -> AbsorbancePlotResult:
         series: list[PlotSeries] = []
         skipped: list[tuple[str, str]] = []
         invalid_counts: list[tuple[str, int]] = []
@@ -98,7 +98,11 @@ class HistoricalAbsorbanceService:
                     if path is not None
                 ),
             )
-            values, invalid = calculate_absorbance(dataset, absorbance)
+            values, invalid = (
+                calculate_tauc_direct(dataset)
+                if tauc
+                else calculate_absorbance(dataset, absorbance)
+            )
             invalid_counts.append((entry.display_name, invalid))
             series.append(PlotSeries(
                 name=entry.display_name,

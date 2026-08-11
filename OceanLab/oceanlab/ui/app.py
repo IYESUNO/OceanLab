@@ -30,7 +30,7 @@ from ..config import (
 )
 
 LOG_FILE = Path(tempfile.gettempdir()) / "OceanLab" / "OceanLab.log"
-DEFAULT_NAME_SUFFIX = "{integration}-{averages}-{number}"
+DEFAULT_NAME_SUFFIX = "{integration}-{averages}"
 logger = logging.getLogger("OceanLab")
 
 from ..application.acquisition import AcquisitionService, CoalescingEventQueue
@@ -39,7 +39,7 @@ from ..application.pl_results import PlResultService, turbo_color
 from ..application.spectrum_service import SpectrumService
 from ..domain.models import AcquisitionRequest, BaselineSet, DeviceInfo, SpectrumContext, SpectrumFrame
 from ..domain.processing import ProcessingMode
-from ..domain.result_processing import normalize_peak
+from ..domain.result_processing import calculate_tauc_direct_values, normalize_peak, photon_energy_ev
 from ..domain.results import PlotSeries
 from ..ports.exporter import ExportRequest, SpectrumExporter
 from ..ports.preferences import PreferencesRepository
@@ -296,17 +296,28 @@ class OceanLabApp:
             workspace = "PL荧光"
         self.initial_workspace = workspace if workspace in ("采集", "处理", "PL荧光", "AB吸收") else "采集"
         processing_mode = str(preferences.get("processing_mode", "原始强度"))
-        if processing_mode not in ("原始强度", "暗谱扣除", "峰值归一化", "透过率 (%)", "吸光度 (A)"):
+        if processing_mode not in (
+            "原始强度",
+            "暗谱扣除",
+            "峰值归一化",
+            "透过率 (%)",
+            "吸光度 (A)",
+            "Tauc 计算结果",
+        ):
             processing_mode = "原始强度"
         ab_mode = str(preferences.get("ab_mode", "吸光度 (A)"))
-        if ab_mode not in ("透过率 (%)", "吸光度 (A)"):
+        if ab_mode not in ("透过率 (%)", "吸光度 (A)", "Tauc 计算结果"):
             ab_mode = "吸光度 (A)"
+        ab_x_axis = str(preferences.get("ab_x_axis", "波长 (nm)"))
+        if ab_x_axis not in ("波长 (nm)", "光子能量 (eV)"):
+            ab_x_axis = "波长 (nm)"
         self.mode_var = tk.StringVar(value=processing_mode)
         self.pl_normalize_var = tk.BooleanVar(value=bool(preferences.get("pl_normalize", False)))
         self.pl_turbo_var = tk.BooleanVar(value=bool(preferences.get("pl_turbo", False)))
         self.pl_active_var = tk.StringVar(value="")
         self.ab_active_var = tk.StringVar(value="")
         self.ab_mode_var = tk.StringVar(value=ab_mode)
+        self.ab_x_axis_var = tk.StringVar(value=ab_x_axis)
         self.xmin_var = tk.StringVar(value="")
         self.xmax_var = tk.StringVar(value="")
         self.range_name_var = tk.StringVar(value="波段")
@@ -338,7 +349,7 @@ class OceanLabApp:
         self.dark_state_var = tk.StringVar(value="共享暗谱：未记录")
         self.pl_status_var = tk.StringVar(value="尚未选择 PL 文件")
         self.pl_background_status_var = tk.StringVar(value="BG：未选择（显示原始 PL）")
-        self.ab_reference_status_var = tk.StringVar(value="BG 参考：未选择")
+        self.ab_reference_status_var = tk.StringVar(value="未选择")
         self.ab_dark_status_var = tk.StringVar(value="仪器暗谱：未选择（可选）")
         self.ab_result_status_var = tk.StringVar(value="请选择样品信号和 BG 参考")
         self.base_name_var = tk.StringVar(value=base_name_text)
@@ -405,6 +416,7 @@ class OceanLabApp:
             "pl_normalize": bool(self.pl_normalize_var.get()),
             "pl_turbo": bool(self.pl_turbo_var.get()),
             "ab_mode": self.ab_mode_var.get(),
+            "ab_x_axis": self.ab_x_axis_var.get(),
             "sdk_home": str(self.sdk_home) if self.sdk_validator(self.sdk_home) else "",
         }
         try:
@@ -1140,6 +1152,9 @@ class OceanLabApp:
     def current_plot_uses_pixels(self) -> bool:
         return self.current_workspace() in ("采集", "处理") and self.x_axis_var.get() == "像素索引"
 
+    def current_plot_uses_energy(self) -> bool:
+        return self.current_workspace() == "AB吸收" and self.ab_x_axis_var.get() == "光子能量 (eV)"
+
     def on_workspace_changed(self, _event=None) -> None:
         if not hasattr(self, "plot"):
             return
@@ -1416,6 +1431,22 @@ class OceanLabApp:
         self.plot.y_min = self.plot.y_max = None
         self.refresh_plot()
 
+    def set_ab_x_axis(self, value: str) -> None:
+        if value not in ("波长 (nm)", "光子能量 (eV)"):
+            return
+        self.ab_x_axis_var.set(value)
+        self.plot.x_min = self.plot.x_max = None
+        self.update_ab_axis_button_styles()
+        self.update_cursor_axis_labels()
+        self.refresh_plot()
+
+    def update_ab_axis_button_styles(self) -> None:
+        if not hasattr(self, "ab_wavelength_axis_button"):
+            return
+        energy = self.ab_x_axis_var.get() == "光子能量 (eV)"
+        self.ab_wavelength_axis_button.configure(style="TButton" if energy else "Selected.TButton")
+        self.ab_energy_axis_button.configure(style="Selected.TButton" if energy else "TButton")
+
     def select_ab_sample_files(self) -> None:
         from tkinter import filedialog, messagebox
 
@@ -1453,7 +1484,7 @@ class OceanLabApp:
         except (OSError, ValueError) as exc:
             messagebox.showerror("BG 参考无法读取", str(exc), parent=self.root)
             return
-        self.ab_reference_status_var.set(f"BG 参考：{reference.name}（{len(reference.wavelengths)} 点）")
+        self.ab_reference_status_var.set(reference.source_path.name)
         self.update_import_selection_styles()
         self.plot.x_min = self.plot.x_max = self.plot.y_min = self.plot.y_max = None
         self.refresh_plot()
@@ -1480,7 +1511,7 @@ class OceanLabApp:
 
     def clear_ab_reference(self) -> None:
         self.historical_absorbance_service.clear_reference()
-        self.ab_reference_status_var.set("BG 参考：未选择")
+        self.ab_reference_status_var.set("未选择")
         self.update_import_selection_styles()
         self.plot.x_min = self.plot.x_max = self.plot.y_min = self.plot.y_max = None
         self.refresh_plot()
@@ -1495,7 +1526,7 @@ class OceanLabApp:
     def clear_historical_ab(self) -> None:
         self.historical_absorbance_service.clear()
         self.ab_active_var.set("")
-        self.ab_reference_status_var.set("BG 参考：未选择")
+        self.ab_reference_status_var.set("未选择")
         self.ab_dark_status_var.set("仪器暗谱：未选择（可选）")
         self.ab_result_status_var.set("请选择样品信号和 BG 参考")
         self.rebuild_ab_file_list()
@@ -2605,6 +2636,8 @@ class OceanLabApp:
             return
         if self.current_plot_uses_pixels():
             self.cursor_position_var.set(f"{x:.0f}")
+        elif self.current_plot_uses_energy():
+            self.cursor_position_var.set(f"{x:.4f}")
         else:
             self.cursor_position_var.set(f"{x:.2f}")
         self.cursor_var.set(f"强度: {y:.2f}")
@@ -2619,6 +2652,9 @@ class OceanLabApp:
         if self.current_plot_uses_pixels():
             self.cursor_axis_name_var.set("像素")
             self.cursor_unit_var.set("pixel")
+        elif self.current_plot_uses_energy():
+            self.cursor_axis_name_var.set("光子能量")
+            self.cursor_unit_var.set("eV")
         else:
             self.cursor_axis_name_var.set("波长")
             self.cursor_unit_var.set("nm")
@@ -2633,7 +2669,9 @@ class OceanLabApp:
         if crosshair_active:
             self.cursor_tool_name_var.set("十字架")
             self.cursor_axis_name_var.set("X")
-            self.cursor_unit_var.set("pixel" if self.current_plot_uses_pixels() else "nm")
+            self.cursor_unit_var.set(
+                "pixel" if self.current_plot_uses_pixels() else "eV" if self.current_plot_uses_energy() else "nm"
+            )
             if self.plot.crosshair_position is None:
                 self.cursor_position_var.set("")
                 self.cursor_var.set("Y: —")
@@ -3307,6 +3345,12 @@ class OceanLabApp:
                     return [], "归一化强度"
             if mode == "原始强度":
                 return list(self.raw_spectrum), "强度 (counts)"
+            if mode == "Tauc 计算结果":
+                absorbance, label = self.spectrum_service.processed(ProcessingMode.ABSORBANCE)
+                if not absorbance:
+                    return [], label
+                values, _invalid = calculate_tauc_direct_values(self.wavelengths, absorbance)
+                return list(values), "Tauc (A·eV)²"
             return self.spectrum_service.processed(ProcessingMode(mode))
         return [], "强度 (counts)"
 
@@ -3354,10 +3398,29 @@ class OceanLabApp:
                 self.pl_status_var.set(f"已显示 {len(result.series)} 条 PL 曲线")
         elif workspace == "AB吸收":
             self.plot.set_empty_message("尚未载入 AB 数据", "选择样品信号和 BG 参考；仪器暗谱可选")
-            absorbance = self.ab_mode_var.get() == "吸光度 (A)"
-            result = self.historical_absorbance_service.build_plot(absorbance)
-            label = self.ab_mode_var.get()
-            self.plot.set_series(list(result.series), label, "波长 (nm)", self.preferred_plot_y_bounds(label))
+            mode = self.ab_mode_var.get()
+            tauc = mode == "Tauc 计算结果"
+            result = self.historical_absorbance_service.build_plot(mode != "透过率 (%)", tauc=tauc)
+            label = "Tauc (A·eV)²" if tauc else mode
+            series = list(result.series)
+            x_label = "波长 (nm)"
+            if self.ab_x_axis_var.get() == "光子能量 (eV)":
+                energy_series: list[PlotSeries] = []
+                for item in series:
+                    points: list[tuple[float, float]] = []
+                    for wavelength, value in zip(item.wavelengths, item.values):
+                        energy = photon_energy_ev(wavelength)
+                        if math.isfinite(energy):
+                            points.append((energy, value))
+                    points.sort()
+                    energy_series.append(replace(
+                        item,
+                        wavelengths=tuple(point[0] for point in points),
+                        values=tuple(point[1] for point in points),
+                    ))
+                series = energy_series
+                x_label = "光子能量 (eV)"
+            self.plot.set_series(series, label, x_label, self.preferred_plot_y_bounds(label))
             historical = True
             if not self.historical_absorbance_service.entries:
                 self.ab_result_status_var.set("请选择一份或多份带样品信号")
@@ -3403,7 +3466,12 @@ class OceanLabApp:
             peak_x, peak_y = max(finite, key=lambda p: p[1])
             fps = self.current_fps()
             frame_text = "历史文件" if historical else f"{fps:.2f} fps" if fps > 0 else "单帧"
-            peak_text = f"pixel {peak_x:.0f}" if self.current_plot_uses_pixels() else f"{peak_x:.2f} nm"
+            if self.current_plot_uses_pixels():
+                peak_text = f"pixel {peak_x:.0f}"
+            elif self.current_plot_uses_energy():
+                peak_text = f"{peak_x:.4f} eV"
+            else:
+                peak_text = f"{peak_x:.2f} nm"
             peak_metric = f"峰值: {peak_y:.2f}"
             position_metric = f"峰位: {peak_text}"
             frame_metric = f"帧率: {frame_text}"
@@ -3547,15 +3615,20 @@ class OceanLabApp:
             "{number}": clean_position,
             "{position}": clean_position,
         }
-        raw_segments = (
-            self.name_prefix_var.get() if name_prefix is None else name_prefix,
-            self.base_name_var.get() if variable is None else variable,
-            self.name_suffix_var.get() if name_suffix is None else name_suffix,
-        )
+        prefix_segment = self.name_prefix_var.get() if name_prefix is None else name_prefix
+        variable_segment = self.base_name_var.get() if variable is None else variable
+        suffix_segment = self.name_suffix_var.get() if name_suffix is None else name_suffix
+        # The position number belongs to the variable itself (for example
+        # ``sample01``), even when an older saved suffix still contains the
+        # legacy {number}/{position} placeholder.
+        variable_segment = f"{str(variable_segment).strip()}{clean_position}"
+        raw_segments = (prefix_segment, variable_segment, suffix_segment)
         segments: list[str] = []
         for segment in raw_segments:
             expanded = str(segment).strip()
             for placeholder, replacement in replacements.items():
+                if placeholder in ("{number}", "{position}"):
+                    replacement = ""
                 expanded = expanded.replace(placeholder, replacement)
             expanded = expanded.strip().strip("-").strip()
             if expanded:
