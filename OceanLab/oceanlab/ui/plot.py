@@ -119,6 +119,20 @@ class SpectrumPlot:
         return ticks
 
     @staticmethod
+    def format_axis_tick(value: float, step: float) -> str:
+        """Format a tick without collapsing distinct zoomed values to one label."""
+        if not math.isfinite(value):
+            return "—"
+        if not math.isfinite(step) or step <= 0:
+            return f"{value:.6g}"
+        if math.isclose(value, 0.0, rel_tol=0.0, abs_tol=step * 1e-9):
+            value = 0.0
+        if abs(value) >= 1e7 or (value != 0.0 and abs(value) < 1e-6):
+            return f"{value:.6g}"
+        decimals = 0 if step >= 1.0 else min(9, max(1, int(math.ceil(-math.log10(step)))))
+        return f"{value:.{decimals}f}"
+
+    @staticmethod
     def clip_segment_to_rect(
         x1: float,
         y1: float,
@@ -282,21 +296,39 @@ class SpectrumPlot:
         if bounds is None:
             return [], []
         lo, hi = bounds
-        pairs = [point for item in self.series for point in self.visible_series_points(item, lo, hi)]
+        pairs = [
+            point
+            for item in self.series
+            for point in self.visible_series_points(item, lo, hi, include_neighbors=True)
+        ]
         if not pairs:
             return [], []
         xs, ys = zip(*pairs)
         return list(xs), list(ys)
 
     @staticmethod
-    def visible_series_points(item: PlotSeries, xmin: float, xmax: float) -> list[tuple[float, float]]:
-        """Clip a monotonic spectrum by binary search before doing per-point work."""
+    def visible_series_points(
+        item: PlotSeries,
+        xmin: float,
+        xmax: float,
+        *,
+        include_neighbors: bool = False,
+        finite_only: bool = True,
+    ) -> list[tuple[float, float]]:
+        """Slice a monotonic spectrum without changing any X/Y pairings.
+
+        The optional adjacent points let the renderer clip the original line
+        precisely at both viewport edges after zooming.
+        """
         start = bisect_left(item.wavelengths, xmin)
         end = bisect_right(item.wavelengths, xmax)
+        if include_neighbors:
+            start = max(0, start - 1)
+            end = min(len(item.wavelengths), end + 1)
         return [
             (x, y)
             for x, y in zip(item.wavelengths[start:end], item.values[start:end])
-            if math.isfinite(y)
+            if not finite_only or math.isfinite(y)
         ]
 
     def set_cursor_index(self, index: int, redraw: bool = True) -> bool:
@@ -789,13 +821,19 @@ class SpectrumPlot:
         def py(y):
             return bottom - (y - ymin) / (ymax - ymin or 1) * (bottom - top)
 
-        for tick in self.nice_ticks(xmin, xmax, 7):
+        x_ticks = self.nice_ticks(xmin, xmax, 7)
+        x_tick_step = (
+            min(second - first for first, second in zip(x_ticks, x_ticks[1:]))
+            if len(x_ticks) >= 2
+            else (xmax - xmin) / 7.0
+        )
+        for tick in x_ticks:
             x = px(tick)
             c.create_line(x, top, x, bottom, fill=self.GRID, dash=(4, 4))
             c.create_text(
                 x,
                 x_tick_y,
-                text=f"{tick:.0f}",
+                text=self.format_axis_tick(tick, x_tick_step),
                 fill=self.AXIS,
                 font=axis_tick_font,
                 tags="x_tick_label",
@@ -815,30 +853,48 @@ class SpectrumPlot:
 
         max_points = max(300, int(right - left) // 2)
         for series_index, item in enumerate(self.series):
-            visible = self.visible_series_points(item, xmin, xmax)
-            visible = self.peak_downsample(visible, max_points)
-            points = [(px(x), py(y)) for x, y in visible]
+            visible = self.visible_series_points(
+                item,
+                xmin,
+                xmax,
+                include_neighbors=True,
+                finite_only=False,
+            )
+            finite_runs: list[list[tuple[float, float]]] = []
+            current_run: list[tuple[float, float]] = []
+            for point in visible:
+                if math.isfinite(point[1]):
+                    current_run.append(point)
+                else:
+                    if current_run:
+                        finite_runs.append(current_run)
+                    current_run = []
+            if current_run:
+                finite_runs.append(current_run)
+
             paths: list[list[float]] = []
-            current_path: list[float] = []
-            for (x1, y1), (x2, y2) in zip(points, points[1:]):
-                clipped = self.clip_segment_to_rect(x1, y1, x2, y2, left, top, right, bottom)
-                if clipped is None:
-                    if len(current_path) >= 4:
-                        paths.append(current_path)
-                    current_path = []
-                    continue
-                cx1, cy1, cx2, cy2 = clipped
-                if current_path and (
-                    abs(current_path[-2] - cx1) > 0.5 or abs(current_path[-1] - cy1) > 0.5
-                ):
-                    if len(current_path) >= 4:
-                        paths.append(current_path)
-                    current_path = []
-                if not current_path:
-                    current_path.extend((cx1, cy1))
-                current_path.extend((cx2, cy2))
-            if len(current_path) >= 4:
-                paths.append(current_path)
+            for run in finite_runs:
+                points = [(px(x), py(y)) for x, y in self.peak_downsample(run, max_points)]
+                current_path: list[float] = []
+                for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                    clipped = self.clip_segment_to_rect(x1, y1, x2, y2, left, top, right, bottom)
+                    if clipped is None:
+                        if len(current_path) >= 4:
+                            paths.append(current_path)
+                        current_path = []
+                        continue
+                    cx1, cy1, cx2, cy2 = clipped
+                    if current_path and (
+                        abs(current_path[-2] - cx1) > 0.5 or abs(current_path[-1] - cy1) > 0.5
+                    ):
+                        if len(current_path) >= 4:
+                            paths.append(current_path)
+                        current_path = []
+                    if not current_path:
+                        current_path.extend((cx1, cy1))
+                    current_path.extend((cx2, cy2))
+                if len(current_path) >= 4:
+                    paths.append(current_path)
             for path in paths:
                 c.create_line(
                     *path,

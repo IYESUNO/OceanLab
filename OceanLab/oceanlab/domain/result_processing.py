@@ -5,6 +5,8 @@ from typing import Sequence
 
 from .results import AbsorbanceDataset
 
+PHOTON_ENERGY_EV_NM = 1239.841984
+
 
 def subtract_dark(raw: Sequence[float], dark: Sequence[float]) -> tuple[float, ...]:
     if len(raw) != len(dark):
@@ -42,5 +44,42 @@ def calculate_absorbance(
             value = ratio * 100.0 if math.isfinite(ratio) else float("nan")
         if not math.isfinite(value):
             invalid += 1
+        values.append(value)
+    return tuple(values), invalid
+
+
+def photon_energy_ev(wavelength_nm: float) -> float:
+    """Convert a positive wavelength in nanometres to photon energy in eV."""
+    if not math.isfinite(wavelength_nm) or wavelength_nm <= 0:
+        return float("nan")
+    return PHOTON_ENERGY_EV_NM / wavelength_nm
+
+
+def calculate_tauc_direct(dataset: AbsorbanceDataset) -> tuple[tuple[float, ...], int]:
+    """Return the direct-transition Tauc ordinate ``(A * hν)²``.
+
+    Absorbance is proportional to the absorption coefficient when the sample
+    thickness is constant, so its scale does not change the Tauc intercept.
+    """
+    absorbance_values, _ = calculate_absorbance(dataset, absorbance=True)
+    return calculate_tauc_direct_values(dataset.wavelengths, absorbance_values)
+
+
+def calculate_tauc_direct_values(
+    wavelengths: Sequence[float],
+    absorbance_values: Sequence[float],
+) -> tuple[tuple[float, ...], int]:
+    """Apply the direct-transition Tauc ordinate to paired wavelength/A data."""
+    if len(wavelengths) != len(absorbance_values):
+        raise ValueError("波长与吸光度的数据点数量不一致。")
+    values: list[float] = []
+    invalid = 0
+    for wavelength, absorbance in zip(wavelengths, absorbance_values):
+        energy = photon_energy_ev(wavelength)
+        if not math.isfinite(energy) or not math.isfinite(absorbance):
+            value = float("nan")
+            invalid += 1
+        else:
+            value = (absorbance * energy) ** 2
         values.append(value)
     return tuple(values), invalid
