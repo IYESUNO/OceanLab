@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 TOOLBAR_ICON_DIR = PROJECT_DIR / "assets" / "oceanview_toolbar"
 APP_ICON_PATH = PROJECT_DIR / "assets" / "app_icons" / "oceanlab-icon-spectrum.ico"

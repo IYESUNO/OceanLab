@@ -1,10 +1,10 @@
-OceanLab 2.0.2 Portable Edition
+OceanLab 2.0.3 Portable Edition
 ================================
 
 Getting Started
 ---------------
 1. Extract the complete ZIP archive. Do not run the application from an archive preview window.
-2. Double-click OceanLab-2.0.2.exe.
+2. Double-click OceanLab-2.0.3.exe.
 3. Simulation mode requires no additional software.
 4. For a physical instrument, separately install the official 64-bit OceanDirect SDK and USB driver.
 
