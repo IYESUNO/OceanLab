@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from ..domain.results import AbsorbanceDataset, ImportedSpectrum
+from .curve_txt import CURVE_EXPORT_MARKER
 
 
 class DelimitedSpectrumImporter:
@@ -20,6 +21,8 @@ class DelimitedSpectrumImporter:
     def load(self, path: Path) -> ImportedSpectrum:
         path = Path(path).resolve()
         text = self._read_text(path)
+        if text.splitlines() and text.splitlines()[0].strip() == CURVE_EXPORT_MARKER:
+            raise ValueError("这是已处理的曲线结果 TXT，不是原始波长/强度光谱，不能作为 PL 样品或 AB 样品/BG 导入。")
         if self.OCEANVIEW_MARKER in text:
             result = self._load_oceanview(path, text)
         elif any(line.strip().startswith("# OceanLab spectrum export") for line in text.splitlines()):

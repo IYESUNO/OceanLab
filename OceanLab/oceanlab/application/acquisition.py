@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import logging
 import threading
 import time
 from collections import deque
@@ -8,8 +9,11 @@ from dataclasses import asdict
 from typing import Any, Callable
 
 from ..domain.models import AcquisitionRequest, AcquisitionState, ConnectedDevice, SpectrumContext
-from ..ports.spectrometer import SpectrometerPort
+from ..ports.spectrometer import SpectrometerInterrupted, SpectrometerPort
 from .messages import AcquisitionCommand, ApplicationEvent
+
+
+logger = logging.getLogger("OceanLab")
 
 
 class CoalescingEventQueue:
@@ -20,7 +24,9 @@ class CoalescingEventQueue:
     def put(self, item: ApplicationEvent | tuple[str, dict[str, Any]]) -> None:
         event = item if isinstance(item, ApplicationEvent) else ApplicationEvent(item[0], item[1])
         with self._lock:
-            if event.kind == "spectrum" and self._items and self._items[-1].kind == "spectrum":
+            if (event.kind == "spectrum" and self._items and self._items[-1].kind == "spectrum"
+                    and event.payload.get("continuous", True) and self._items[-1].payload.get("continuous", True)
+                    and event.payload.get("request_id") == self._items[-1].payload.get("request_id")):
                 self._items[-1] = event
             else:
                 self._items.append(event)
@@ -61,20 +67,40 @@ class AcquisitionService(threading.Thread):
         self.running = False
         self.interval_s = 0.08
         self.connection_check_interval_s = 2.0
+        self.active_request_id: str | None = None
+        self._interrupted = threading.Event()
+        self._pause_requested = threading.Event()
 
     def send(self, command: str, **payload: Any) -> None:
+        if command == "stop":
+            self._pause_requested.set()
+            pause = getattr(self.spectrometer, "pause_pending", None)
+            if callable(pause):
+                pause()
+        if command in ("disconnect", "shutdown"):
+            self._interrupted.set()
+            cancel = getattr(self.spectrometer, "cancel_pending", None)
+            if callable(cancel):
+                cancel()
+        logger.info("Acquisition command queued: %s request=%s", command, payload.get("request_id"))
         self.commands.put(AcquisitionCommand(command, payload))
 
     def emit(self, kind: str, **payload: Any) -> None:
+        if kind in ("spectrum", "error", "configuration_applied", "settings_applied", "acquisition_state"):
+            payload.setdefault("request_id", self.active_request_id)
         self.events.put(ApplicationEvent(kind, payload))
 
     def transition(self, state: AcquisitionState) -> None:
         self.state = state
+        logger.info("Acquisition state: %s request=%s", state.name, self.active_request_id)
         self.emit("service_state", state=state)
 
     def run(self) -> None:
         try:
             self.spectrometer = self._factory()
+            bind_interrupt = getattr(self.spectrometer, "bind_interrupt_event", None)
+            if callable(bind_interrupt):
+                bind_interrupt(self._interrupted)
             initializer = getattr(self.spectrometer, "initialize", None)
             version = tuple(initializer()) if callable(initializer) else (0, 0, 0)
             self.emit("sdk_ready", version=version)
@@ -95,9 +121,14 @@ class AcquisitionService(threading.Thread):
             except queue.Empty:
                 pass
             except Exception as exc:
-                self.emit("error", message=self.describe_error(exc))
-                if self.state is AcquisitionState.CONFIGURING:
-                    self.transition(AcquisitionState.IDLE)
+                cancelled = isinstance(exc, SpectrometerInterrupted)
+                logger.exception("Acquisition command failed: request=%s", self.active_request_id)
+                if self.connected is not None or self.state in (AcquisitionState.CONNECTING, AcquisitionState.CONFIGURING):
+                    try:
+                        self._disconnect()
+                    except Exception:
+                        logger.exception("Device release after command failure failed")
+                self.emit("error", message=self.describe_error(exc), cancelled=cancelled)
 
             if self.running and time.monotonic() >= next_acquisition:
                 started = time.monotonic()
@@ -116,13 +147,16 @@ class AcquisitionService(threading.Thread):
         return str(exc)
 
     def _handle(self, command: AcquisitionCommand) -> None:
+        if command.kind in ("connect", "disconnect"):
+            self._interrupted.clear()
         handlers = {
             "connect": self._connect,
             "disconnect": self._disconnect,
             "configure_start": lambda: self._configure("start", command.payload),
             "configure_single": lambda: self._configure("single", command.payload),
+            "configure": lambda: self._configure("configure", command.payload),
             "start": self._start,
-            "stop": self._stop,
+            "stop": self._stop_acquisition,
             "single": self._single,
             "settings": lambda: self._apply_partial(command.payload),
             "corrections": lambda: self._apply_partial(command.payload),
@@ -179,9 +213,16 @@ class AcquisitionService(threading.Thread):
         if self.spectrometer is None or self.connected is None:
             raise RuntimeError("请先连接仪器。")
         request = self._request_from_payload(payload)
+        self.active_request_id = payload.get("request_id")
+        if self._interrupted.is_set():
+            raise SpectrometerInterrupted("采集请求已取消。")
+        if self._pause_requested.is_set():
+            return
         self.running = False
         self.transition(AcquisitionState.CONFIGURING)
         context = self.spectrometer.apply_configuration(request)
+        if self._interrupted.is_set():
+            raise SpectrometerInterrupted("配置请求已取消，仪器连接将释放。")
         self.request = request
         self.context = context
         self.interval_s = max(0.001, request.interval_ms / 1000.0)
@@ -196,16 +237,24 @@ class AcquisitionService(threading.Thread):
             "light_source": context.light_source,
         })
         self.emit("configuration_applied", settings=settings, context=context, action=action)
+        if self._pause_requested.is_set():
+            # Keep the successfully verified configuration. The queued stop
+            # acknowledges readiness only after this hardware operation ends.
+            self.transition(AcquisitionState.IDLE)
+            return
         if action == "start":
             self._start()
+        elif action == "single":
+            self._single()
         else:
             self.transition(AcquisitionState.IDLE)
-            self._single()
 
     def _apply_partial(self, payload: dict[str, Any]) -> None:
+        self.active_request_id = payload.get("request_id")
         request = self._request_from_payload(payload)
         if self.spectrometer is None or self.connected is None:
             raise RuntimeError("请先连接仪器。")
+        self.transition(AcquisitionState.CONFIGURING)
         context = self.spectrometer.apply_configuration(request)
         self.request = request
         self.context = context
@@ -216,38 +265,66 @@ class AcquisitionService(threading.Thread):
             "boxcar": context.boxcar,
             "interval_ms": request.interval_ms,
         })
+        self.transition(AcquisitionState.IDLE)
 
     def _start(self) -> None:
+        if self._pause_requested.is_set():
+            return
         if self.context is None:
             raise RuntimeError("采集配置尚未由仪器确认，拒绝启动采集。")
         self.running = True
         self.transition(AcquisitionState.ACQUIRING)
         self.emit("acquisition_state", running=True)
 
-    def _stop(self) -> None:
+    def _stop_acquisition(self) -> None:
+        cancelled = self._pause_requested.is_set()
+        clear_pause = getattr(self.spectrometer, "clear_pause", None)
+        if callable(clear_pause):
+            clear_pause()
+        self._pause_requested.clear()
         self.running = False
         self.transition(AcquisitionState.IDLE if self.connected else AcquisitionState.DISCONNECTED)
-        self.emit("acquisition_state", running=False)
+        if self.connected:
+            self.emit("acquisition_state", running=False, cancelled=cancelled)
 
     def _single(self) -> None:
+        if self._pause_requested.is_set():
+            return
         if self.context is None:
             raise RuntimeError("采集配置尚未由仪器确认。")
+        self.transition(AcquisitionState.ACQUIRING)
         self._acquire_frame()
+        if self.connected is not None:
+            self.transition(AcquisitionState.IDLE)
 
     def _acquire_frame(self) -> None:
         if self.spectrometer is None or self.context is None:
             return
         try:
+            if self._interrupted.is_set():
+                raise SpectrometerInterrupted("采集请求已取消。")
+            if self._pause_requested.is_set():
+                return
             frame = self.spectrometer.acquire(self.context)
-            self.emit("spectrum", spectrum=list(frame.values), timestamp=frame.timestamp, context=frame.context)
+            if self._interrupted.is_set():
+                raise SpectrometerInterrupted("采集请求已取消，已丢弃本帧数据。")
+            if self._pause_requested.is_set():
+                return
+            if frame is None:
+                raise RuntimeError("设备未返回光谱，且没有暂停请求。")
+            self.emit("spectrum", spectrum=list(frame.values), timestamp=frame.timestamp, context=frame.context,
+                      continuous=self.running)
         except Exception as exc:
+            logger.exception("Spectrum acquisition failed: request=%s", self.active_request_id)
             self.running = False
-            self.emit("acquisition_state", running=False)
             try:
                 self._disconnect()
             except Exception:
                 pass
-            self.emit("error", message=f"采集失败，仪器连接已释放：{self.describe_error(exc)}")
+            self.emit("acquisition_state", running=False)
+            cancelled = isinstance(exc, SpectrometerInterrupted)
+            prefix = "采集已取消，仪器连接已释放" if cancelled else "采集失败，仪器连接已释放"
+            self.emit("error", message=f"{prefix}：{self.describe_error(exc)}", cancelled=cancelled)
 
     def _check_connection(self) -> None:
         if self.spectrometer is None or self.connected is None:

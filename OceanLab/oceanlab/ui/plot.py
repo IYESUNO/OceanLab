@@ -54,6 +54,7 @@ class SpectrumPlot:
         self.interaction_mode = "normal"
         self.mode_callback = None
         self._drawn_canvas_size: tuple[int, int] | None = None
+        self._drawn_view_bounds: tuple[float | None, ...] | None = None
         self._pending_canvas_size: tuple[int, int] | None = None
         self._resize_draw_after_id: str | None = None
         self._interaction_draw_after_id: str | None = None
@@ -172,9 +173,10 @@ class SpectrumPlot:
         y_label: str,
         x_label: str = "波长 (nm)",
         preferred_y_bounds: tuple[float, float] | None = None,
+        metadata: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self.set_series(
-            [PlotSeries("", tuple(wavelengths), tuple(values), self.LINE, active=True)],
+            [PlotSeries("", tuple(wavelengths), tuple(values), self.LINE, active=True, metadata=metadata)],
             y_label,
             x_label,
             preferred_y_bounds,
@@ -195,13 +197,14 @@ class SpectrumPlot:
         next_series = [item for item in series if item.visible]
         style_only = (
             len(next_series) == len(self.series)
+            and self._drawn_view_bounds == (self.x_min, self.x_max, self.y_min, self.y_max)
             and y_label == self.y_label
             and x_label == self.x_label
             and preferred_y_bounds == self.preferred_y_bounds
             and all(
                 before.name == after.name
                 and before.wavelengths == after.wavelengths
-                and before.values == after.values
+                and self.series_values_equal(before.values, after.values)
                 for before, after in zip(self.series, next_series)
             )
             and bool(self.canvas.find_withtag("spectrum_line"))
@@ -228,6 +231,13 @@ class SpectrumPlot:
             self.update_series_styles()
         else:
             self.draw()
+
+    @staticmethod
+    def series_values_equal(before, after) -> bool:
+        return before == after or (len(before) == len(after) and all(
+            first == second or (math.isnan(first) and math.isnan(second))
+            for first, second in zip(before, after)
+        ))
 
     def update_series_styles(self) -> None:
         """Update colors and active emphasis without rebuilding plot geometry."""
@@ -751,6 +761,7 @@ class SpectrumPlot:
             self.canvas.after_cancel(self._interaction_draw_after_id)
             self._interaction_draw_after_id = None
         c = self.canvas
+        self._drawn_view_bounds = (self.x_min, self.x_max, self.y_min, self.y_max)
         c.delete("all")
         self._legend_rects = []
         width = max(240, c.winfo_width())
@@ -788,10 +799,11 @@ class SpectrumPlot:
             return
         xmin, xmax = x_bounds
         data_ymin, data_ymax = min(ys), max(ys)
+        minimum_margin = 1.0 if "counts" in self.y_label.lower() else 1e-6
         if data_ymax <= data_ymin:
-            data_ymax = data_ymin + 1.0
+            data_ymax = data_ymin + max(abs(data_ymin) * 0.02, minimum_margin)
         data_span = data_ymax - data_ymin
-        margin = max(data_span * 0.06, abs(data_ymax) * 0.02, 1.0)
+        margin = max(data_span * 0.06, abs(data_ymax) * 0.02, minimum_margin)
         if self.y_min is not None and self.y_max is not None and self.y_max > self.y_min:
             ymin, ymax = self.y_min, self.y_max
         elif data_ymin >= 0:

@@ -22,7 +22,6 @@ from ..domain.models import (
 
 DEFAULT_SDK_HOME = Path(r"C:\OceanDirect")
 _WINDOWS_DLL_HANDLES: list[Any] = []
-QE65000_SATURATION_INTENSITY = 63_000.0
 
 
 def _model_key(model: str) -> str:
@@ -30,14 +29,8 @@ def _model_key(model: str) -> str:
 
 
 def default_saturation_intensity(model: str, max_intensity: float) -> float:
-    """Return the usable saturation reference for a known detector family."""
-    maximum = float(max_intensity)
-    if maximum <= 0:
-        return maximum
-    key = _model_key(model)
-    if "QE65000" in key or "QE65PRO" in key:
-        return min(maximum, QE65000_SATURATION_INTENSITY)
-    return maximum
+    """OceanView uses the detector maximum, not a corrected-peak estimate."""
+    return float(max_intensity)
 
 
 def normalize_sdk_home(value: str | os.PathLike[str]) -> Path:
@@ -207,22 +200,16 @@ class OceanDirectSpectrometer:
             saturation_intensity = default_saturation_intensity(model, max_intensity)
             advanced = getattr(self.device, "Advanced", None)
             saturation_reader = getattr(advanced, "get_autonull_saturation_level", None)
-            if callable(saturation_reader):
+            if callable(saturation_reader) and "QE65000" not in _model_key(model):
                 try:
                     reported_saturation = float(saturation_reader())
                 except Exception:
                     reported_saturation = 0.0
-                # The legacy QE65000 saturation reference is lower than its
-                # nominal 16-bit maximum.  Prefer a usable SDK value for
-                # newer devices, but do not replace the QE65000 fallback
-                # with a generic 65535 response.
+                # QE65000 uses its ADC maximum, matching OceanView. Other
+                # devices can report an explicit usable SDK saturation value.
                 if (
                     reported_saturation > 0
                     and math.isfinite(reported_saturation)
-                    and not (
-                        ("QE65000" in _model_key(model) or "QE65PRO" in _model_key(model))
-                        and reported_saturation >= max_intensity * 0.999
-                    )
                 ):
                     saturation_intensity = min(max_intensity, reported_saturation)
             info = DeviceInfo(
@@ -291,9 +278,12 @@ class OceanDirectSpectrometer:
         capabilities = self.connected.info.capabilities
         previous = self._snapshot_configuration(request.interval_ms, capabilities)
         try:
-            self.device.set_integration_time(int(request.integration_us))
-            self.device.set_scans_to_average(max(1, int(request.averages)))
-            self.device.set_boxcar_width(max(0, int(request.boxcar)))
+            if previous["core"]["integration_us"] != int(request.integration_us):
+                self.device.set_integration_time(int(request.integration_us))
+            if previous["core"]["averages"] != max(1, int(request.averages)):
+                self.device.set_scans_to_average(max(1, int(request.averages)))
+            if previous["core"]["boxcar"] != max(0, int(request.boxcar)):
+                self.device.set_boxcar_width(max(0, int(request.boxcar)))
             actual = self._core_settings(request.interval_ms)
             requested_core = {
                 "integration_us": int(request.integration_us),
@@ -306,6 +296,12 @@ class OceanDirectSpectrometer:
                     raise RuntimeError(f"{name} 读回值 {actual[name]} 与请求值 {value} 不一致。")
 
             options = self._apply_optional_configuration(request, capabilities, previous)
+            # Optional SDK setters can affect other parameters. Verify the
+            # final state before declaring this configuration confirmed.
+            actual = self._core_settings(request.interval_ms)
+            for name, value in requested_core.items():
+                if actual[name] != value:
+                    raise RuntimeError(f"{name} 最终读回值 {actual[name]} 与请求值 {value} 不一致。")
         except Exception:
             self._restore_configuration(previous)
             raise
@@ -366,10 +362,24 @@ class OceanDirectSpectrometer:
         for name, enabled, setter, getter, requested in operations:
             if not enabled:
                 continue
-            setter()
+            if actual[name] != requested:
+                setter()
             actual[name] = getter()
             if actual[name] != requested:
                 raise RuntimeError(f"{name} 读回值与请求不一致。")
+        # SDKs may couple NLC and electric-dark switches. Check the complete
+        # final state after every setter has run, not just intermediate states.
+        supported = {
+            "electric_dark": capabilities.electric_dark,
+            "nonlinearity": capabilities.nonlinearity,
+            "trigger_mode": capabilities.trigger,
+            "light_source": capabilities.light_source,
+        }
+        for name, enabled, setter, getter, requested in operations:
+            if supported[name]:
+                actual[name] = getter()
+                if enabled and actual[name] != requested:
+                    raise RuntimeError(f"{name} 最终读回值与请求不一致。")
         return actual
 
     def _restore_configuration(self, previous: dict[str, Any]) -> None:
@@ -389,15 +399,94 @@ class OceanDirectSpectrometer:
         except Exception:
             pass
 
-    def acquire(self, context: SpectrumContext) -> SpectrumFrame:
-        if self.device is None or self.connected is None:
-            raise RuntimeError("请先连接仪器。")
+    def bind_pause_event(self, pause_requested) -> None:
+        self._pause_requested = pause_requested
+
+    def _paused(self) -> bool:
+        flag = getattr(self, "_pause_requested", None)
+        return flag is not None and flag.is_set()
+
+    def _read_values(self) -> tuple[float, ...]:
         values = tuple(float(value) for value in self.device.get_formatted_spectrum())
+        return self._validate_values(values)
+
+    def _validate_values(self, values) -> tuple[float, ...]:
+        values = tuple(float(value) for value in values)
         if len(values) != len(self.connected.wavelengths):
             raise RuntimeError(f"光谱长度异常：期望 {len(self.connected.wavelengths)} 点，实际 {len(values)} 点。")
         if not all(math.isfinite(value) for value in values):
             raise RuntimeError("光谱包含非有限数值，已拒绝本帧数据。")
+        return values
+
+    def acquire(self, context: SpectrumContext) -> SpectrumFrame | None:
+        if self.device is None or self.connected is None:
+            raise RuntimeError("请先连接仪器。")
+        if self._paused():
+            return None
+        if context.averages <= 1:
+            values = self._read_values()
+        else:
+            values = self._acquire_average(context)
+        if self._paused():
+            return None
         return SpectrumFrame(values=values, timestamp=time.time(), context=context)
+
+    def _acquire_average(self, context: SpectrumContext) -> tuple[float, ...] | None:
+        # OceanView checks for stop between scans, then processes the average.
+        # SDK electric-dark subtraction is linear; averaging its results is
+        # equivalent to subtracting the averaged dark level (apart from roundoff).
+        # NLC is nonlinear, so it MUST run once after the average, before boxcar.
+        try:
+            self.device.set_scans_to_average(1)
+            if context.boxcar:
+                self.device.set_boxcar_width(0)
+            if context.nonlinearity:
+                self.device.set_nonlinearity_correction_usage(False)
+            self._verify_scan_configuration(context, 1, 0, False)
+            total = [0.0] * context.pixel_count
+            for _ in range(context.averages):
+                if self._paused():
+                    return None
+                scan = self._read_values()
+                if self._paused():
+                    return None
+                for index, value in enumerate(scan):
+                    total[index] += value
+            values = [value / context.averages for value in total]
+            if context.nonlinearity:
+                # No second dark subtraction: electric-dark is already applied.
+                # This processes supplied data; it does not acquire another scan
+                # or mutate the SDK's stored dark spectrum.
+                if context.electric_dark:
+                    self.device.set_electric_dark_correction_usage(False)
+                    if self.device.get_electric_dark_correction_usage():
+                        raise RuntimeError("处理平均谱前 electric_dark 关闭读回失败。")
+                values = self.device.nonlinearity_correct_spectrum2([0.0] * len(values), values)
+            if context.boxcar:
+                values = self.device.boxcar_correct_spectrum(values, context.boxcar)
+            return self._validate_values(values)
+        finally:
+            # Restoration failure is a real device error, never a successful
+            # pause. The service releases that connection through its error path.
+            self.device.set_scans_to_average(context.averages)
+            if context.boxcar:
+                self.device.set_boxcar_width(context.boxcar)
+            if context.nonlinearity:
+                self.device.set_nonlinearity_correction_usage(True)
+                if self.connected.info.capabilities.electric_dark:
+                    self.device.set_electric_dark_correction_usage(context.electric_dark)
+            self._verify_scan_configuration(context, context.averages, context.boxcar, context.nonlinearity)
+
+    def _verify_scan_configuration(self, context, averages, boxcar, nonlinearity) -> None:
+        actual = self._core_settings(1)
+        expected = {"integration_us": context.integration_us, "averages": averages, "boxcar": boxcar}
+        if any(actual[name] != value for name, value in expected.items()):
+            raise RuntimeError("逐次扫描参数读回不一致。")
+        capabilities = self.connected.info.capabilities
+        if capabilities.electric_dark and bool(self.device.get_electric_dark_correction_usage()) != context.electric_dark:
+            raise RuntimeError("逐次扫描 electric_dark 读回不一致。")
+        if capabilities.nonlinearity and bool(self.device.get_nonlinearity_correction_usage()) != nonlinearity:
+            raise RuntimeError("逐次扫描 nonlinearity 读回不一致。")
 
     def check_connection(self) -> bool:
         if self.device is None or self.connected is None:

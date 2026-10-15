@@ -3,12 +3,15 @@ from __future__ import annotations
 import logging
 import sys
 import tempfile
+from functools import partial
 from pathlib import Path
 
 from .adapters.oceandirect import OceanDirectSpectrometer, is_oceandirect_home, normalize_sdk_home
 from .adapters.filesystem import DelimitedSpectrumExporter, JsonPreferencesRepository
 from .adapters.spectrum_files import DelimitedSpectrumImporter
 from .adapters.simulation import SimulatedSpectrometer
+from .adapters.isolated_spectrometer import IsolatedSpectrometer
+from .adapters.windows_lifecycle import hold_running_marker
 from .application.acquisition import AcquisitionService, CoalescingEventQueue
 from .config import APP_ICON_PATH, APP_USER_MODEL_ID, PREFERENCES_FILE
 from .ui.app import OceanLabApp
@@ -186,12 +189,15 @@ def apply_windows_app_icon(root) -> str:
 
 
 def service_factory(sdk_home: Path, events: CoalescingEventQueue) -> AcquisitionService:
-    return AcquisitionService(lambda: OceanDirectSpectrometer(sdk_home), events)
+    hardware_factory = partial(OceanDirectSpectrometer, sdk_home)
+    factory = partial(IsolatedSpectrometer, hardware_factory) if is_oceandirect_home(sdk_home) else hardware_factory
+    return AcquisitionService(factory, events)
 
 
 def run_gui(sdk_home: Path) -> int:
     import tkinter as tk
 
+    hold_running_marker()
     configure_windows_app_identity()
     enable_windows_per_monitor_dpi()
     root = tk.Tk()

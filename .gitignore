@@ -10,6 +10,7 @@ dist/
 *.spec
 
 OceanLab/release/*.zip
+OceanLab/release/*.exe
 OceanLab/release/*.sha256.txt
 *.lnk
 
@@ -18,3 +19,6 @@ OceanLab/release/*.sha256.txt
 
 /Snipaste_*.png
 /design-qa.md
+
+# Local design and acquisition audit evidence.
+/.research/

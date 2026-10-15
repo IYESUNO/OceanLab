@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import queue
+import re
 import tempfile
 import time
 from dataclasses import dataclass, replace
@@ -15,6 +16,7 @@ from typing import Any, Callable
 
 
 from ..config import (
+    APP_VERSION,
     INTEGRATION_PRESET_NAMES,
     SAVE_FORMAT_CSV,
     SAVE_FORMAT_OPTIONS,
@@ -39,9 +41,9 @@ from ..application.pl_results import PlResultService, turbo_color
 from ..application.spectrum_service import SpectrumService
 from ..domain.models import AcquisitionRequest, BaselineSet, DeviceInfo, SpectrumContext, SpectrumFrame
 from ..domain.processing import ProcessingMode
-from ..domain.result_processing import calculate_tauc_direct_values, normalize_peak, photon_energy_ev
+from ..domain.result_processing import PHOTON_ENERGY_EV_NM, calculate_tauc_values, normalize_peak, photon_energy_ev
 from ..domain.results import PlotSeries
-from ..ports.exporter import ExportRequest, SpectrumExporter
+from ..ports.exporter import CurveExportRequest, ExportRequest, SpectrumExporter
 from ..ports.preferences import PreferencesRepository
 from ..ports.spectrometer import SpectrometerPort
 from ..ports.spectrum_importer import SpectrumImporter
@@ -57,6 +59,11 @@ from .panels import (
 )
 from .dialogs import center_dialog, close_modal
 from .widgets import LargeCheckbutton, LargeRadiobutton
+from .signal_offset_dialog import SignalOffsetDialog
+from .tauc_modes import TAUC_DIRECT, TAUC_INDIRECT, TAUC_OPTIONS, normalize_tauc_mode, tauc_exponent, tauc_label
+from .history_widgets import EllipsisLabel
+from .history_icons import HistoryIconButton
+from ..domain.signal_offset import assess_signal
 
 
 @dataclass(frozen=True)
@@ -110,12 +117,9 @@ class OceanLabApp:
         self.device_info: DeviceInfo | None = None
         self.wavelengths: list[float] = []
         self.raw_spectrum: list[float] = []
-        self.dark_spectrum: list[float] | None = None
         self.reference_spectrum: list[float] | None = None
         self.frame_context: SpectrumContext | None = None
-        self.dark_context: SpectrumContext | None = None
         self.reference_context: SpectrumContext | None = None
-        self.dark_timestamp: float | None = None
         self.reference_timestamp: float | None = None
         self.spectrum_service = SpectrumService()
         self.last_timestamp: float | None = None
@@ -127,6 +131,10 @@ class OceanLabApp:
         self.simulation_settings = SIMULATION_SETTINGS.copy()
         self.applied_settings = SIMULATION_SETTINGS.copy()
         self.single_in_progress = False
+        self.acquisition_pending = False
+        self.cancel_requested = False
+        self._next_acquisition_request_id = 1
+        self.active_acquisition_request_id: str | None = None
         self.single_started_at: float | None = None
         self.single_expected_s = 0.0
         self.single_progress_after_id: str | None = None
@@ -144,6 +152,8 @@ class OceanLabApp:
         self.save_verified = False
         self.pl_row_variables: dict[str, dict[str, Any]] = {}
         self.ab_row_variables: dict[str, dict[str, Any]] = {}
+        self.ab_group_header_labels: dict[str, Any] = {}
+        self.ab_group_widgets: dict[str, dict[str, Any]] = {}
         self.workspace_view_bounds: dict[str, tuple[float | None, float | None, float | None, float | None]] = {}
         self._active_workspace: str | None = None
         self.single_capture_candidates: dict[int, SingleCaptureSnapshot] = {}
@@ -155,6 +165,8 @@ class OceanLabApp:
         self._show_single_capture_history = False
 
         preferences = self.load_preferences()
+        self.curve_export_directory = str(preferences.get("curve_export_directory", "") or "")
+        self.curve_export_verified = {}
         # TXT matches the OceanView-compatible format expected by the Win7
         # deployment.  Keep an explicitly saved legacy CSV preference intact.
         save_format = preferences.get("save_format", SAVE_FORMAT_TXT)
@@ -175,12 +187,12 @@ class OceanLabApp:
         if integration_unit not in ("ms", "s"):
             integration_unit = "ms"
         try:
-            integration_value = Decimal(str(preferences.get("integration_value", "10")))
+            integration_value = Decimal(str(preferences.get("integration_value", "100")))
             if integration_value <= 0:
                 raise ValueError
             integration_text = self.decimal_text(integration_value)
         except (InvalidOperation, TypeError, ValueError):
-            integration_text = "10"
+            integration_text = "100"
             integration_unit = "ms"
         try:
             averages_value = min(1000, max(1, int(preferences.get("averages", 1))))
@@ -295,18 +307,17 @@ class OceanLabApp:
         if workspace == "PL":
             workspace = "PL荧光"
         self.initial_workspace = workspace if workspace in ("采集", "处理", "PL荧光", "AB吸收") else "采集"
-        processing_mode = str(preferences.get("processing_mode", "原始强度"))
+        processing_mode = normalize_tauc_mode(str(preferences.get("processing_mode", "原始强度")))
         if processing_mode not in (
             "原始强度",
-            "暗谱扣除",
             "峰值归一化",
             "透过率 (%)",
             "吸光度 (A)",
-            "Tauc 计算结果",
+            *TAUC_OPTIONS,
         ):
             processing_mode = "原始强度"
-        ab_mode = str(preferences.get("ab_mode", "吸光度 (A)"))
-        if ab_mode not in ("透过率 (%)", "吸光度 (A)", "Tauc 计算结果"):
+        ab_mode = normalize_tauc_mode(str(preferences.get("ab_mode", "吸光度 (A)")))
+        if ab_mode not in ("透过率 (%)", "吸光度 (A)", *TAUC_OPTIONS):
             ab_mode = "吸光度 (A)"
         ab_x_axis = str(preferences.get("ab_x_axis", "波长 (nm)"))
         if ab_x_axis not in ("波长 (nm)", "光子能量 (eV)"):
@@ -316,6 +327,8 @@ class OceanLabApp:
         self.pl_turbo_var = tk.BooleanVar(value=bool(preferences.get("pl_turbo", False)))
         self.pl_active_var = tk.StringVar(value="")
         self.ab_active_var = tk.StringVar(value="")
+        self.ab_group_var = tk.StringVar(value=self.historical_absorbance_service.current_group.name)
+        self.ab_action_status_var = tk.StringVar(value="")
         self.ab_mode_var = tk.StringVar(value=ab_mode)
         self.ab_x_axis_var = tk.StringVar(value=ab_x_axis)
         self.xmin_var = tk.StringVar(value="")
@@ -345,13 +358,13 @@ class OceanLabApp:
         )
         self.saturation_var = tk.StringVar(value="饱和度: —")
         self.settings_state_var = tk.StringVar(value="连接仪器或进入模拟模式后可应用参数")
-        self.baseline_state_var = tk.StringVar(value="暗谱：未记录    参考谱：未记录")
-        self.dark_state_var = tk.StringVar(value="共享暗谱：未记录")
+        self.baseline_state_var = tk.StringVar(value="参考谱：未记录")
         self.pl_status_var = tk.StringVar(value="尚未选择 PL 文件")
-        self.pl_background_status_var = tk.StringVar(value="BG：未选择（显示原始 PL）")
+        self.pl_background_status_var = tk.StringVar(value="未选择（显示原始 PL）")
         self.ab_reference_status_var = tk.StringVar(value="未选择")
-        self.ab_dark_status_var = tk.StringVar(value="仪器暗谱：未选择（可选）")
         self.ab_result_status_var = tk.StringVar(value="请选择样品信号和 BG 参考")
+        self.ab_offset_status_var = tk.StringVar(value="未应用信号偏移")
+        self.ab_offset_dialog = None
         self.base_name_var = tk.StringVar(value=base_name_text)
         self.share_variable_name_var = tk.BooleanVar(value=share_variable_name)
         self.shared_base_name = shared_base_name_text
@@ -403,6 +416,7 @@ class OceanLabApp:
             "position": self.position_var.get().strip(),
             "save_format": self.save_format_var.get(),
             "save_directory": self.save_directory_var.get().strip(),
+            "curve_export_directory": self.curve_export_directory,
             "suffix_mode": self.save_suffix_var.get(),
             "sequence_digits": self.sequence_digits_var.get(),
             "sequence": self.save_sequence,
@@ -444,7 +458,7 @@ class OceanLabApp:
         messagebox.showerror("OceanLab 程序错误", f"{exc_type.__name__}: {exc_value}\n\n日志：{LOG_FILE}")
 
     def configure_style(self) -> None:
-        self.root.title("OceanLab 光谱采集")
+        self.root.title(f"OceanLab {APP_VERSION} 光谱采集")
         dpi_scale = max(1.0, min(3.0, float(self.root.winfo_fpixels("1i")) / 96.0))
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
@@ -615,6 +629,8 @@ class OceanLabApp:
             borderwidth=1,
         )
         style.map("PlotTool.TButton", background=[("active", "#e5edf5")], bordercolor=[("active", "#94a3b8")])
+        style.configure("Saved.PlotTool.TButton", background="#198754", bordercolor="#146c43")
+        style.map("Saved.PlotTool.TButton", background=[("active", "#146c43")], bordercolor=[("active", "#146c43")])
         style.configure(
             "PlotToolActive.TButton",
             font=("Segoe MDL2 Assets", 14 if self.compact_layout else 22),
@@ -626,6 +642,22 @@ class OceanLabApp:
         )
         style.map("PlotToolActive.TButton", background=[("active", "#115ea3")])
         style.configure("TButton", font=("Microsoft YaHei UI", 10), padding=(10, 7))
+        style.configure("History.TButton", font=("Microsoft YaHei UI", 9), padding=(6, 3))
+        style.configure("History.TMenubutton", font=("Microsoft YaHei UI", 9), padding=(6, 3))
+        for kind, color in (("Primary", "#0f6cbd"), ("Selected", "#198754")):
+            name = kind + ".History.TButton"
+            style.configure(name, font=("Microsoft YaHei UI", 9), padding=(6, 3),
+                            background=color, foreground="#ffffff", borderwidth=1)
+            style.map(name, background=[("active", "#115ea3" if kind == "Primary" else "#146c43"),
+                                        ("disabled", "#a8b5c4")], foreground=[("disabled", "#ffffff")])
+        style.configure("History.TCombobox", padding=2, font=("Microsoft YaHei UI", 9))
+        style.configure("History.TCheckbutton", padding=(0, 2), font=("Microsoft YaHei UI", 9))
+        style.configure("HistoryName.TLabel", background="#ffffff", foreground="#172033",
+                        font=("Microsoft YaHei UI", 9), padding=(0, 3))
+        style.configure("ABGroupName.TLabel", background="#f4f7fb", foreground="#172033",
+                        font=("Microsoft YaHei UI", 9), padding=(0, 3))
+        for name, color in (("ABGroupHeader.TLabel", "#e8eef5"), ("Selected.ABGroupHeader.TLabel", "#dceafb")):
+            style.configure(name, background=color, foreground="#243b55", font=("Microsoft YaHei UI", 9, "bold"), padding=0)
         input_padding = 2 if self.compact_layout else 5
         input_font = ("Microsoft YaHei UI", 9 if self.compact_layout else 10)
         style.configure("TEntry", padding=input_padding, font=input_font)
@@ -1008,6 +1040,14 @@ class OceanLabApp:
             if mode:
                 self.plot_tool_buttons[mode] = button
 
+        self.curve_save_icon = self.create_save_toolbar_icon("#111111")
+        self.curve_save_verified_icon = self.create_save_toolbar_icon("#ffffff")
+        self.plot_toolbar_images.append(self.curve_save_icon)
+        self.curve_save_button = self.ttk.Button(
+            toolbar, image=self.curve_save_icon, command=self.save_plot_curves, style="PlotTool.TButton",
+        )
+        self.attach_tooltip(self.curve_save_button, "保存当前显示曲线为两列 TXT（完整数据，保留当前横轴和处理结果）")
+
         # Keep the legend in the spare toolbar area.  It should never cover
         # spectral data or consume any of the plot's x/y drawing rectangle.
         self.plot_legend_canvas = self.tk.Canvas(
@@ -1074,7 +1114,6 @@ class OceanLabApp:
             metrics,
             textvariable=self.saturation_var,
             style="Metric.TLabel",
-            width=10 if self.compact_layout else 12,
             anchor="w",
         )
         self.saturation_label.pack(side="left", padx=(2 if self.compact_layout else 3, 0))
@@ -1226,6 +1265,13 @@ class OceanLabApp:
             return
         workspace = self.current_workspace()
         if workspace == "采集":
+            self.curve_save_button.pack_forget()
+        elif not self.curve_save_button.winfo_manager():
+            self.curve_save_button.pack(
+                side="left", before=self.plot_legend_canvas,
+                padx=(0, 3 if self.compact_layout else 5),
+            )
+        if workspace == "采集":
             if not self.sidebar_save_panel.winfo_manager():
                 # The notebook is expandable.  Reinsert the save panel before
                 # it so Tk's pack order remains stable after a tab switch.
@@ -1247,20 +1293,23 @@ class OceanLabApp:
     def update_import_selection_styles(self) -> None:
         if hasattr(self, "pl_open_button"):
             self.pl_open_button.configure(
-                style="Selected.TButton" if self.pl_result_service.entries else "Primary.TButton"
+                style="Selected.History.TButton" if self.pl_result_service.entries else "Primary.History.TButton"
             )
             self.pl_background_button.configure(
-                style="Selected.TButton" if self.pl_result_service.background is not None else "TButton"
+                style="Selected.History.TButton" if self.pl_result_service.background is not None else "History.TButton"
             )
         if hasattr(self, "ab_samples_button"):
             self.ab_samples_button.configure(
-                style="Selected.TButton" if self.historical_absorbance_service.entries else "Primary.TButton"
+                style="Selected.History.TButton" if self.historical_absorbance_service.current_group.entries else "Primary.History.TButton"
             )
             self.ab_reference_file_button.configure(
-                style="Selected.TButton" if self.historical_absorbance_service.reference is not None else "TButton"
+                style="Selected.History.TButton" if self.historical_absorbance_service.reference is not None else "History.TButton"
             )
-            self.ab_dark_file_button.configure(
-                style="Selected.TButton" if self.historical_absorbance_service.dark is not None else "TButton"
+            self.ab_reference_file_button.configure(
+                text="更换 BG…" if self.historical_absorbance_service.reference is not None else "选择 BG…"
+            )
+            self.ab_reload_button.configure(
+                state="normal" if self.historical_absorbance_service.current_group.entries else "disabled"
             )
 
     def select_pl_files(self) -> None:
@@ -1306,14 +1355,14 @@ class OceanLabApp:
         except (OSError, ValueError) as exc:
             messagebox.showerror("BG 文件无法读取", str(exc), parent=self.root)
             return
-        self.pl_background_status_var.set(f"BG：{background.name}（{len(background.wavelengths)} 点）")
+        self.pl_background_status_var.set(background.source_path.name)
         self.plot.y_min = self.plot.y_max = None
         self.rebuild_pl_file_list()
         self.refresh_plot()
 
     def clear_pl_background(self) -> None:
         self.pl_result_service.clear_background()
-        self.pl_background_status_var.set("BG：未选择（显示原始 PL）")
+        self.pl_background_status_var.set("未选择（显示原始 PL）")
         self.plot.y_min = self.plot.y_max = None
         self.rebuild_pl_file_list()
         self.refresh_plot()
@@ -1322,7 +1371,7 @@ class OceanLabApp:
         self.pl_result_service.clear()
         self.pl_active_var.set("")
         self.pl_status_var.set("尚未选择 PL 文件")
-        self.pl_background_status_var.set("BG：未选择（显示原始 PL）")
+        self.pl_background_status_var.set("未选择（显示原始 PL）")
         self.rebuild_pl_file_list()
         self.plot.x_min = self.plot.x_max = self.plot.y_min = self.plot.y_max = None
         self.refresh_plot()
@@ -1344,56 +1393,54 @@ class OceanLabApp:
         turbo_enabled = bool(self.pl_turbo_var.get())
         turbo_denominator = max(1, len(self.pl_result_service.entries) - 1)
         for index, entry in enumerate(self.pl_result_service.entries):
-            row = self.ttk.Frame(self.pl_list_frame, style="Card.TFrame")
-            row.pack(fill="x", pady=2)
-            row.columnconfigure(3, weight=1)
-            visible_var = self.tk.BooleanVar(value=entry.visible)
-            name_var = self.tk.StringVar(value=entry.display_name)
-            self.pl_row_variables[entry.entry_id] = {"visible": visible_var, "name": name_var}
-            self.ttk.Checkbutton(
-                row,
-                variable=visible_var,
-                command=lambda entry_id=entry.entry_id, variable=visible_var: self.set_pl_visible(entry_id, variable),
-            ).grid(row=0, column=0, sticky="w")
-            self.ttk.Radiobutton(
-                row,
-                text="活动",
-                variable=self.pl_active_var,
-                value=entry.entry_id,
-                command=lambda entry_id=entry.entry_id: self.set_pl_active(entry_id),
-            ).grid(row=0, column=1, padx=(2, 5))
             display_color = turbo_color(1.0 - index / turbo_denominator) if turbo_enabled else entry.color
-            color_button = self.tk.Button(
-                row,
-                text="■",
-                foreground=display_color,
-                disabledforeground=display_color,
-                background="#ffffff",
-                relief="flat",
-                command=lambda entry_id=entry.entry_id, color=entry.color: self.choose_pl_color(entry_id, color),
-                state="disabled" if turbo_enabled else "normal",
-            )
-            color_button.grid(row=0, column=2, padx=(0, 5))
-            self.pl_row_variables[entry.entry_id]["color_button"] = color_button
-            name_entry = self.ttk.Entry(row, textvariable=name_var)
-            name_entry.grid(row=0, column=3, sticky="ew")
-            name_entry.bind(
-                "<Return>",
-                lambda _event, entry_id=entry.entry_id, variable=name_var: self.rename_pl_entry(entry_id, variable),
-            )
-            name_entry.bind(
-                "<FocusOut>",
-                lambda _event, entry_id=entry.entry_id, variable=name_var: self.rename_pl_entry(entry_id, variable),
-            )
-            self.ttk.Button(
-                row,
-                text="移除",
-                style="Tool.TButton",
-                command=lambda entry_id=entry.entry_id: self.remove_pl_entry(entry_id),
-            ).grid(row=0, column=4, padx=(5, 0))
-            baseline_text = "将扣除已选 BG" if self.pl_result_service.background is not None else "原始 PL（未选择 BG）"
-            self.ttk.Label(row, text=baseline_text, style="Hint.TLabel").grid(row=1, column=3, sticky="w", pady=(2, 0))
-            self.bind_list_mousewheel(row, self.pl_list_canvas)
+            self.build_history_file_row("pl", entry, display_color, turbo_enabled)
+
+    def build_history_file_row(self, kind, entry, color, color_disabled=False, parent=None, background="#ffffff"):
+        frame = parent if parent is not None else getattr(self, kind + "_list_frame")
+        canvas = getattr(self, kind + "_list_canvas")
+        variables = getattr(self, kind + "_row_variables")
+        active_variable = getattr(self, kind + "_active_var")
+        set_visible = getattr(self, "set_" + kind + "_visible")
+        set_active = getattr(self, "set_" + kind + "_active")
+        choose_color = getattr(self, "choose_" + kind + "_color")
+        remove = getattr(self, "remove_" + kind + "_entry")
+        row = self.tk.Frame(frame, background=background) if parent is not None else self.ttk.Frame(frame, style="Card.TFrame")
+        row.pack(fill="x", pady=1)
+        row.columnconfigure(3, weight=1)
+        visible = self.tk.BooleanVar(value=entry.visible)
+        name = self.tk.StringVar(value=entry.display_name)
+        visible_button = HistoryIconButton(row, icon="eye", variable=visible, toggle=True,
+                                           background=background,
+                                           command=lambda: set_visible(entry.entry_id, visible))
+        visible_button.grid(row=0, column=0)
+        self.attach_tooltip(visible_button, lambda: "隐藏此曲线" if visible.get() else "显示此曲线")
+        active_button = HistoryIconButton(row, icon="crosshair", variable=active_variable, value=entry.entry_id,
+                                          background=background,
+                                          command=lambda: set_active(entry.entry_id))
+        active_button.grid(row=0, column=1, padx=1)
+        self.attach_tooltip(active_button, lambda: "当前活动曲线（双倍线宽、峰值及游标）"
+                            if active_variable.get() == entry.entry_id else "设为活动曲线（双倍线宽、峰值及游标）")
+        color_button = HistoryIconButton(row, icon="palette", foreground=color,
+                                         background=background,
+                                         command=lambda: choose_color(entry.entry_id, entry.color),
+                                         state="disabled" if color_disabled else "normal")
+        color_button.grid(row=0, column=2, padx=(0, 3))
+        self.attach_tooltip(color_button, lambda: "Turbo 渐变色已开启，关闭后可选择颜色"
+                            if color_button.disabled else "选择曲线颜色")
+        name_label = EllipsisLabel(row, textvariable=name, style="ABGroupName.TLabel" if parent is not None else "HistoryName.TLabel", takefocus=True, cursor="hand2")
+        name_label.grid(row=0, column=3, sticky="ew")
+        self.attach_tooltip(name_label, lambda: entry.spectrum.source_path.name, delay_ms=600, max_width=None)
+        for event in ("<Button-1>", "<Return>", "<space>"):
+            name_label.bind(event, lambda _event: set_active(entry.entry_id))
+        remove_button = HistoryIconButton(row, icon="trash", background=background, command=lambda: remove(entry.entry_id))
+        remove_button.grid(row=0, column=4, padx=(4, 0))
+        self.attach_tooltip(remove_button, "移除此曲线")
+        variables[entry.entry_id] = {"visible": visible, "name": name, "name_label": name_label,
+                                    "color_button": color_button, "remove_button": remove_button,
+                                    "active_button": active_button, "visible_button": visible_button}
+        if parent is None:
+            self.bind_list_mousewheel(row, canvas)
 
     def bind_list_mousewheel(self, widget, canvas) -> None:
         def scroll(event):
@@ -1432,6 +1479,7 @@ class OceanLabApp:
 
     def set_pl_active(self, entry_id: str) -> None:
         self.pl_result_service.set_active(entry_id)
+        self.pl_active_var.set(self.pl_result_service.active_id or "")
         row = self.pl_row_variables.get(entry_id)
         if row is not None:
             row["visible"].set(True)
@@ -1478,6 +1526,45 @@ class OceanLabApp:
         self.plot.y_min = self.plot.y_max = None
         self.refresh_plot()
 
+    def open_ab_offset_dialog(self) -> None:
+        if self.ab_offset_dialog is not None and self.ab_offset_dialog.window.winfo_exists():
+            self.ab_offset_dialog.window.lift()
+            return
+        if self.historical_absorbance_service.group_signals():
+            self.ab_offset_dialog = SignalOffsetDialog(self)
+
+    def update_ab_offset_status(self) -> None:
+        service = self.historical_absorbance_service
+        descriptions = []
+        suspected = []
+        platforms = []
+        for key, name, spectrum in service.group_signals():
+            info = assess_signal(spectrum.raw)
+            if info.plateau is not None:
+                platforms.append(f'{name} 原平台 {info.plateau:.4f} counts（{info.plateau_points} 点）')
+            correction = service.current_group.offsets.get(key)
+            if correction:
+                descriptions.append(f'{name} +{correction.delta:.1f}' +
+                                    ('（自动估算）' if correction.automatic else '（估算）' if correction.estimated else ''))
+            elif info.suspected_offset:
+                suspected.append(name)
+        text = '已应用：' + '；'.join(descriptions) if descriptions else '未应用信号偏移'
+        if suspected:
+            text += '\n疑似整体偏移：' + '、'.join(suspected) + '；请预览检查'
+        if platforms:
+            text += '\n' + '；'.join(platforms)
+        self.ab_offset_status_var.set(text)
+        if hasattr(self, 'ab_offset_summary_var'):
+            summary = (f'偏移：已应用 {len(descriptions)} 项' +
+                       ('（自动估算）' if any(c.automatic for c in service.current_group.offsets.values()) else '')
+                       if descriptions else '偏移：未应用')
+            if suspected:
+                summary += f'\n疑似整体偏移 {len(suspected)} 项，请检查'
+            self.ab_offset_summary_var.set(summary)
+        if hasattr(self, 'ab_offset_button'):
+            self.ab_offset_button.configure(state='normal' if service.group_signals() else 'disabled',
+                                            style='Primary.History.TButton' if suspected else 'Selected.History.TButton' if descriptions else 'History.TButton')
+
     def set_ab_x_axis(self, value: str) -> None:
         if value not in ("波长 (nm)", "光子能量 (eV)"):
             return
@@ -1491,14 +1578,81 @@ class OceanLabApp:
         if not hasattr(self, "ab_wavelength_axis_button"):
             return
         energy = self.ab_x_axis_var.get() == "光子能量 (eV)"
-        self.ab_wavelength_axis_button.configure(style="TButton" if energy else "Selected.TButton")
-        self.ab_energy_axis_button.configure(style="Selected.TButton" if energy else "TButton")
+        self.ab_wavelength_axis_button.configure(style="History.TButton" if energy else "Selected.History.TButton")
+        self.ab_energy_axis_button.configure(style="Selected.History.TButton" if energy else "History.TButton")
+
+    def sync_ab_group_controls(self) -> None:
+        service = self.historical_absorbance_service
+        self.ab_group_var.set(service.current_group.name)
+        if hasattr(self, "ab_group_combo"):
+            self.ab_group_combo.configure(values=tuple(group.name for group in service.groups))
+        self.ab_reference_status_var.set(service.reference.source_path.name if service.reference else "未选择")
+        self.update_ab_offset_status()
+        for group in service.groups:
+            label = self.ab_group_header_labels.get(group.group_id)
+            widgets = self.ab_group_widgets.get(group.group_id)
+            if widgets is not None:
+                widgets["title"].set(self.ab_group_header_text(group))
+                selected = group.group_id == service.current_group_id
+                color = "#dceafb" if selected else "#e8eef5"
+                widgets["frame"].configure(highlightbackground="#8eafd5" if selected else "#d3dce7")
+                widgets["header"].configure(background=color)
+                label.configure(style="Selected.ABGroupHeader.TLabel" if selected else "ABGroupHeader.TLabel")
+                widgets["visible"].set(group.visible)
+                for button in (widgets["visible_button"], widgets["remove_button"]):
+                    button.configure(background=color)
+                widgets["remove_button"].configure(state="normal" if service.can_remove_group(group.group_id) else "disabled")
+        self.update_import_selection_styles()
+
+    @staticmethod
+    def ab_group_header_text(group) -> str:
+        return f"{group.name} · {len(group.entries)} 份 · " + ("BG 已选择" if group.reference else "等待 BG") + (" · 隐藏" if not group.visible else "")
+
+    def create_ab_group(self) -> None:
+        group = self.historical_absorbance_service.create_group()
+        self.ab_action_status_var.set(f"已新建{group.name}；请选择本组 BG 和样品。")
+        self.rebuild_ab_file_list()
+        self.refresh_plot()
+
+    def on_ab_group_changed(self, _event=None) -> None:
+        service = self.historical_absorbance_service
+        group = next((group for group in service.groups if group.name == self.ab_group_var.get()), None)
+        if group is None:
+            return
+        service.select_group(group.group_id)
+        if group.reference is not None and group.visible:
+            visible = next((entry for entry in group.entries if entry.visible), None)
+            if visible is not None:
+                service.set_active(visible.entry_id)
+        self.sync_ab_group_controls()
+        self.ab_action_status_var.set(f"当前编辑{group.name}；添加样品、更换 BG 仅作用于本组。")
+        self.refresh_plot()
+
+    def clear_ab_group(self) -> None:
+        self.historical_absorbance_service.clear_current_group()
+        self.ab_action_status_var.set(f"已清空{self.historical_absorbance_service.current_group.name}。")
+        self.rebuild_ab_file_list()
+        self.refresh_plot()
+
+    def reload_ab_samples(self) -> None:
+        from tkinter import messagebox
+
+        service = self.historical_absorbance_service
+        paths = tuple(entry.spectrum.source_path for entry in service.current_group.entries)
+        result = service.load_samples(paths, reload=True)
+        if result.errors:
+            messagebox.showwarning(
+                "部分样品未更新（保留原数据）",
+                "\n".join(f"{path.name}：{message}" for path, message in result.errors), parent=self.root,
+            )
+        self.ab_action_status_var.set(f"{service.current_group.name}：重读 {result.duplicates} 份样品，失败 {len(result.errors)} 份。")
+        self.refresh_plot()
 
     def select_ab_sample_files(self) -> None:
         from tkinter import filedialog, messagebox
 
         selected = filedialog.askopenfilenames(
-            title="选择带样品的 AB 信号（可多选）",
+            title=f"为{self.historical_absorbance_service.current_group.name}添加样品（可多选）",
             filetypes=(("光谱文件", "*.csv *.txt"), ("CSV 文件", "*.csv"), ("TXT 文件", "*.txt")),
             parent=self.root,
         )
@@ -1512,15 +1666,19 @@ class OceanLabApp:
                 "\n".join(f"{path.name}：{message}" for path, message in result.errors),
                 parent=self.root,
             )
-        self.rebuild_ab_file_list()
-        self.plot.x_min = self.plot.x_max = self.plot.y_min = self.plot.y_max = None
+        if result.added:
+            self.rebuild_ab_file_list()
+        self.ab_action_status_var.set(
+            f"{self.historical_absorbance_service.current_group.name}：添加 {result.added} 份，重复 {result.duplicates} 份，失败 {len(result.errors)} 份。"
+            + ("重复文件保持原数据；更新内容请点击“重读本组样品”。" if result.duplicates else "")
+        )
         self.refresh_plot()
 
     def select_ab_reference_file(self) -> None:
         from tkinter import filedialog, messagebox
 
         selected = filedialog.askopenfilename(
-            title="选择 BG 参考信号",
+            title=f"选择{self.historical_absorbance_service.current_group.name}的 BG 参考",
             filetypes=(("光谱文件", "*.csv *.txt"), ("CSV 文件", "*.csv"), ("TXT 文件", "*.txt")),
             parent=self.root,
         )
@@ -1532,50 +1690,25 @@ class OceanLabApp:
             messagebox.showerror("BG 参考无法读取", str(exc), parent=self.root)
             return
         self.ab_reference_status_var.set(reference.source_path.name)
-        self.update_import_selection_styles()
-        self.plot.x_min = self.plot.x_max = self.plot.y_min = self.plot.y_max = None
-        self.refresh_plot()
-
-    def select_ab_dark_file(self) -> None:
-        from tkinter import filedialog, messagebox
-
-        selected = filedialog.askopenfilename(
-            title="选择仪器暗谱（可选）",
-            filetypes=(("光谱文件", "*.csv *.txt"), ("CSV 文件", "*.csv"), ("TXT 文件", "*.txt")),
-            parent=self.root,
+        self.sync_ab_group_controls()
+        self.ab_action_status_var.set(
+            f"{self.historical_absorbance_service.current_group.name}：BG 已更新，仅重算本组 {len(self.historical_absorbance_service.current_group.entries)} 份样品。"
         )
-        if not selected:
-            return
-        try:
-            dark = self.historical_absorbance_service.load_dark(Path(selected))
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("仪器暗谱无法读取", str(exc), parent=self.root)
-            return
-        self.ab_dark_status_var.set(f"仪器暗谱：{dark.name}（{len(dark.wavelengths)} 点）")
-        self.update_import_selection_styles()
-        self.plot.x_min = self.plot.x_max = self.plot.y_min = self.plot.y_max = None
         self.refresh_plot()
 
     def clear_ab_reference(self) -> None:
         self.historical_absorbance_service.clear_reference()
         self.ab_reference_status_var.set("未选择")
-        self.update_import_selection_styles()
-        self.plot.x_min = self.plot.x_max = self.plot.y_min = self.plot.y_max = None
-        self.refresh_plot()
-
-    def clear_ab_dark(self) -> None:
-        self.historical_absorbance_service.clear_dark()
-        self.ab_dark_status_var.set("仪器暗谱：未选择（可选）")
-        self.update_import_selection_styles()
-        self.plot.x_min = self.plot.x_max = self.plot.y_min = self.plot.y_max = None
+        self.sync_ab_group_controls()
+        self.ab_action_status_var.set("已清除本组 BG；本组样品等待参考，其他组结果继续显示。")
         self.refresh_plot()
 
     def clear_historical_ab(self) -> None:
         self.historical_absorbance_service.clear()
         self.ab_active_var.set("")
         self.ab_reference_status_var.set("未选择")
-        self.ab_dark_status_var.set("仪器暗谱：未选择（可选）")
         self.ab_result_status_var.set("请选择样品信号和 BG 参考")
+        self.ab_action_status_var.set("已清空全部分析组。")
         self.rebuild_ab_file_list()
         self.plot.x_min = self.plot.x_max = self.plot.y_min = self.plot.y_max = None
         self.refresh_plot()
@@ -1586,61 +1719,72 @@ class OceanLabApp:
         for child in self.ab_list_frame.winfo_children():
             child.destroy()
         self.ab_row_variables.clear()
-        self.update_import_selection_styles()
-        entries = self.historical_absorbance_service.entries
-        if not entries:
-            self.ttk.Label(
-                self.ab_list_frame,
-                text="可一次选择多份带样品信号；活动曲线会以双倍线宽显示。",
-                style="Hint.TLabel",
-            ).pack(anchor="w", padx=4, pady=6)
+        self.ab_group_header_labels.clear()
+        self.ab_group_widgets.clear()
+        for group in self.historical_absorbance_service.groups:
+            group_id = group.group_id
+            card = self.tk.Frame(self.ab_list_frame, background="#f4f7fb", highlightthickness=1, highlightbackground="#d3dce7")
+            card.pack(fill="x", padx=3, pady=(4, 5))
+            header = self.tk.Frame(card, background="#e8eef5", padx=5, pady=3)
+            header.pack(fill="x")
+            header.columnconfigure(2, weight=1)
+            title = self.tk.StringVar(value=self.ab_group_header_text(group))
+            label = EllipsisLabel(header, textvariable=title, style="ABGroupHeader.TLabel", cursor="hand2", takefocus=True)
+            label.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+            self.attach_tooltip(label, lambda group=group: self.ab_group_header_text(group))
+            for event in ("<Button-1>", "<Return>", "<space>"):
+                label.bind(event, lambda _event, name=group.name: self.select_ab_group_header(name))
+            visible = self.tk.BooleanVar(value=group.visible)
+            eye = HistoryIconButton(header, icon="eye", variable=visible, toggle=True, background="#e8eef5",
+                                    command=lambda group_id=group_id, visible=visible: self.set_ab_group_visible(group_id, visible))
+            eye.grid(row=0, column=0, padx=(0, 2))
+            self.attach_tooltip(eye, lambda visible=visible: "隐藏整组曲线（保留各曲线显隐选择）" if visible.get() else "显示此组曲线（保留各曲线显隐选择）")
+            trash = HistoryIconButton(header, icon="trash", background="#e8eef5", command=lambda group_id=group_id: self.remove_ab_group(group_id))
+            trash.grid(row=0, column=1)
+            self.attach_tooltip(trash, lambda group_id=group_id: "删除此分析组（需确认）；源文件保留"
+                                if self.historical_absorbance_service.can_remove_group(group_id) else "保留一个空分析组，无需删除")
+            self.ab_group_header_labels[group_id] = label
+            self.ab_group_widgets[group_id] = {"frame": card, "header": header, "visible": visible, "title": title,
+                                               "visible_button": eye, "remove_button": trash}
+            body = self.tk.Frame(card, background="#f4f7fb", padx=5, pady=3)
+            body.pack(fill="x")
+            for entry in group.entries:
+                self.build_history_file_row("ab", entry, entry.color, parent=body, background="#f4f7fb")
+            if not group.entries:
+                self.ttk.Label(body, text="暂无样品", style="ABGroupName.TLabel").pack(anchor="w", pady=3)
+            self.bind_list_mousewheel(card, self.ab_list_canvas)
+        self.sync_ab_group_controls()
+
+    def select_ab_group_header(self, name: str) -> None:
+        self.ab_group_var.set(name)
+        self.on_ab_group_changed()
+
+    def set_ab_group_visible(self, group_id: str, variable) -> None:
+        self.historical_absorbance_service.set_group_visible(group_id, variable.get())
+        self.ab_action_status_var.set("整组已显示。" if variable.get() else "整组已隐藏；保留各曲线显隐选择。")
+        self.sync_ab_group_controls()
+        self.refresh_plot()
+
+    def remove_ab_group(self, group_id: str) -> None:
+        from tkinter import messagebox
+
+        service = self.historical_absorbance_service
+        group = next((group for group in service.groups if group.group_id == group_id), None)
+        if group is None or not service.can_remove_group(group_id):
             return
-        for entry in entries:
-            row = self.ttk.Frame(self.ab_list_frame, style="Card.TFrame")
-            row.pack(fill="x", pady=2)
-            row.columnconfigure(3, weight=1)
-            visible_var = self.tk.BooleanVar(value=entry.visible)
-            name_var = self.tk.StringVar(value=entry.display_name)
-            self.ab_row_variables[entry.entry_id] = {"visible": visible_var, "name": name_var}
-            self.ttk.Checkbutton(
-                row,
-                variable=visible_var,
-                command=lambda entry_id=entry.entry_id, variable=visible_var: self.set_ab_visible(entry_id, variable),
-            ).grid(row=0, column=0, sticky="w")
-            self.ttk.Radiobutton(
-                row,
-                text="活动",
-                variable=self.ab_active_var,
-                value=entry.entry_id,
-                command=lambda entry_id=entry.entry_id: self.set_ab_active(entry_id),
-            ).grid(row=0, column=1, padx=(2, 5))
-            color_button = self.tk.Button(
-                row,
-                text="■",
-                foreground=entry.color,
-                background="#ffffff",
-                relief="flat",
-                command=lambda entry_id=entry.entry_id, color=entry.color: self.choose_ab_color(entry_id, color),
-            )
-            color_button.grid(row=0, column=2, padx=(0, 5))
-            self.ab_row_variables[entry.entry_id]["color_button"] = color_button
-            name_entry = self.ttk.Entry(row, textvariable=name_var)
-            name_entry.grid(row=0, column=3, sticky="ew")
-            name_entry.bind(
-                "<Return>",
-                lambda _event, entry_id=entry.entry_id, variable=name_var: self.rename_ab_entry(entry_id, variable),
-            )
-            name_entry.bind(
-                "<FocusOut>",
-                lambda _event, entry_id=entry.entry_id, variable=name_var: self.rename_ab_entry(entry_id, variable),
-            )
-            self.ttk.Button(
-                row,
-                text="移除",
-                style="Tool.TButton",
-                command=lambda entry_id=entry.entry_id: self.remove_ab_entry(entry_id),
-            ).grid(row=0, column=4, padx=(5, 0))
-            self.bind_list_mousewheel(row, self.ab_list_canvas)
+        if not messagebox.askyesno(
+            "删除分析组",
+            f"删除“{group.name}”吗？\n\n本组的 {len(group.entries)} 份样品、BG 参考和偏移校正将从当前分析中移除。\n源文件和其他分析组保留。",
+            parent=self.root, icon="warning", default="no",
+        ):
+            return
+        if self.ab_offset_dialog is not None and self.ab_offset_dialog.group_id == group_id:
+            self.ab_offset_dialog.close()
+        name = group.name
+        service.remove_group(group_id)
+        self.ab_action_status_var.set(f"已移除{name}；源文件保留。")
+        self.rebuild_ab_file_list()
+        self.refresh_plot()
 
     def set_ab_visible(self, entry_id: str, variable) -> None:
         self.historical_absorbance_service.set_visible(entry_id, variable.get())
@@ -1649,6 +1793,8 @@ class OceanLabApp:
 
     def set_ab_active(self, entry_id: str) -> None:
         self.historical_absorbance_service.set_active(entry_id)
+        self.ab_active_var.set(self.historical_absorbance_service.active_id or "")
+        self.sync_ab_group_controls()
         row = self.ab_row_variables.get(entry_id)
         if row is not None:
             row["visible"].set(True)
@@ -1700,6 +1846,21 @@ class OceanLabApp:
             logger.warning("Unable to load bundled toolbar icon: %s", path, exc_info=True)
             return None
 
+    def create_save_toolbar_icon(self, color):
+        """Match the existing toolbar's image dimensions without emoji fonts."""
+        image = self.tk.PhotoImage(width=128, height=128)
+        for rectangle in (
+            (18, 14, 94, 22), (18, 14, 26, 114), (105, 30, 113, 114), (18, 106, 113, 114),
+            (38, 22, 46, 54), (38, 46, 88, 54), (80, 22, 88, 54),
+            (36, 64, 94, 72), (36, 64, 44, 106), (86, 64, 94, 106),
+            (49, 80, 81, 86), (49, 94, 81, 100),
+        ):
+            image.put(color, to=rectangle)
+        for step in range(16):
+            image.put(color, to=(90 + step, 14 + step, 98 + step, 22 + step))
+        divisor = 20 if self.compact_layout else 10
+        return image.zoom(3, 3).subsample(divisor, divisor)
+
     def create_crosshair_toolbar_icon(self):
         """Create the crosshair tool icon without adding another binary asset."""
         if self.compact_layout:
@@ -1726,12 +1887,15 @@ class OceanLabApp:
         image.put(color, to=(24, 18, 26, 24))
         return image
 
-    def attach_tooltip(self, widget, text: str) -> None:
+    def attach_tooltip(self, widget, text, delay_ms: int = 450, max_width=760):
         state = {"timer": None, "window": None}
 
         def hide(_event=None):
             if state["timer"] is not None:
-                self.root.after_cancel(state["timer"])
+                try:
+                    self.root.after_cancel(state["timer"])
+                except self.tk.TclError:
+                    pass
                 state["timer"] = None
             if state["window"] is not None:
                 state["window"].destroy()
@@ -1744,27 +1908,40 @@ class OceanLabApp:
             tip = self.tk.Toplevel(widget)
             tip.wm_overrideredirect(True)
             tip.attributes("-topmost", True)
-            x = widget.winfo_rootx()
-            y = widget.winfo_rooty() + widget.winfo_height() + 5
-            tip.geometry(f"+{x}+{y}")
             self.tk.Label(
                 tip,
-                text=text,
+                text=text() if callable(text) else text,
                 background="#172033",
                 foreground="#ffffff",
                 padx=8,
                 pady=4,
                 font=("Microsoft YaHei UI", 9),
+                justify="left",
+                wraplength=(widget.winfo_screenwidth() - 24 if max_width is None
+                            else min(max_width, widget.winfo_screenwidth() - 24)),
             ).pack()
             state["window"] = tip
+            tip.update_idletasks()
+            x = max(8, min(widget.winfo_rootx(), widget.winfo_screenwidth() - tip.winfo_reqwidth() - 8))
+            y = widget.winfo_rooty() + widget.winfo_height() + 5
+            if y + tip.winfo_reqheight() > widget.winfo_screenheight() - 8:
+                y = max(8, widget.winfo_rooty() - tip.winfo_reqheight() - 5)
+            tip.geometry(f"+{x}+{y}")
 
         def schedule(_event=None):
             hide()
-            state["timer"] = self.root.after(450, show)
+            state["timer"] = self.root.after(delay_ms, show)
 
         widget.bind("<Enter>", schedule, add="+")
         widget.bind("<Leave>", hide, add="+")
         widget.bind("<ButtonPress>", hide, add="+")
+        widget.bind("<FocusOut>", hide, add="+")
+        widget.bind("<MouseWheel>", hide, add="+")
+        widget.bind("<Button-4>", hide, add="+")
+        widget.bind("<Button-5>", hide, add="+")
+        widget.bind("<Destroy>", hide, add="+")
+        widget._oceanlab_tooltip = state
+        return state
 
     def update_plot_mode_buttons(self, active_mode: str) -> None:
         for mode, button in self.plot_tool_buttons.items():
@@ -2113,8 +2290,6 @@ class OceanLabApp:
         self.controls_enabled = enabled
         state = "normal" if enabled else "disabled"
         for widget in (
-            self.dark_button,
-            self.clear_dark_button,
             self.processing_reference_button,
             self.processing_clear_baselines_button,
             self.range_button,
@@ -2128,7 +2303,9 @@ class OceanLabApp:
     def update_advanced_control_states(self) -> None:
         local_state = "readonly" if self.controls_enabled else "disabled"
         self.x_axis_combo.configure(state=local_state)
-        real_device = self.controls_enabled and self.connected and not self.simulation_mode
+        real_device = (self.controls_enabled and self.connected and not self.simulation_mode
+                       and not self.connection_pending and not self.acquisition_pending
+                       and not self.single_in_progress and not self.acquiring)
         self.trigger_combo.configure(
             state="readonly" if real_device and self.device_capabilities["trigger"] else "disabled"
         )
@@ -2193,25 +2370,36 @@ class OceanLabApp:
         self.simulation_button.configure(text="模拟模式", state="normal")
 
     def update_acquisition_buttons(self) -> None:
+        self.update_advanced_control_states()
         preset_state = (
             "disabled"
-            if self.closing or self.connection_pending or self.acquiring or self.single_in_progress
+            if self.closing or self.connection_pending or self.acquiring or self.single_in_progress or self.acquisition_pending
             else "normal"
         )
         for button in self.integration_preset_buttons:
             button.configure(state=preset_state)
-        if not self.controls_enabled or self.connection_pending:
+        if self.closing or not self.controls_enabled or self.connection_pending:
             self.start_button.configure(state="disabled")
             self.single_button.configure(state="disabled")
             self.stop_button.configure(state="disabled")
+            return
+        if self.cancel_requested:
+            self.start_button.configure(state="disabled")
+            self.single_button.configure(state="disabled")
+            self.stop_button.configure(text="正在取消" if self.single_in_progress else "正在暂停", state="disabled")
             return
         if self.single_in_progress:
             self.start_button.configure(state="disabled")
             self.single_button.configure(state="disabled")
             self.stop_button.configure(
                 text="取消单次",
-                state="normal" if self.simulation_mode else "disabled",
+                state="normal",
             )
+            return
+        if self.acquisition_pending:
+            self.start_button.configure(state="disabled")
+            self.single_button.configure(state="disabled")
+            self.stop_button.configure(text="取消", state="normal")
             return
         self.stop_button.configure(text="暂停")
         self.start_button.configure(state="disabled" if self.acquiring else "normal")
@@ -2311,6 +2499,10 @@ class OceanLabApp:
         self.refresh_save_verification_state()
 
     def on_integration_preset_changed(self, _event=None) -> None:
+        if self.acquisition_pending or self.single_in_progress or self.acquiring or self.connection_pending:
+            self.integration_preset_var.set(INTEGRATION_PRESET_NAMES[self._active_integration_preset])
+            self.refresh_preset_segments()
+            return
         try:
             requested_index = INTEGRATION_PRESET_NAMES.index(self.integration_preset_var.get())
         except ValueError:
@@ -2420,10 +2612,6 @@ class OceanLabApp:
         self.frame_context = snapshot.frame.context
         self.last_timestamp = snapshot.frame.timestamp
         self._displayed_single_capture_id = snapshot.capture_id
-        if self.spectrum_service.baselines.dark is None:
-            self.dark_spectrum = None
-            self.dark_context = None
-            self.dark_timestamp = None
         if self.spectrum_service.baselines.reference is None:
             self.reference_spectrum = None
             self.reference_context = None
@@ -2460,6 +2648,7 @@ class OceanLabApp:
                     colors[position],
                     active=position == 0,
                     dash=dashes[position],
+                    metadata=self.curve_context_metadata(snapshot.frame.context, snapshot.frame.timestamp),
                 )
             )
         return result
@@ -2716,7 +2905,7 @@ class OceanLabApp:
             self.cursor_position_var.set(f"{x:.4f}")
         else:
             self.cursor_position_var.set(f"{x:.2f}")
-        self.cursor_var.set(f"强度: {y:.2f}")
+        self.cursor_var.set(f"强度: {y:.2f}" if math.isfinite(y) else "强度: 无效")
 
     def update_crosshair_readout(self, x: float, y: float) -> None:
         if self.plot.interaction_mode != "crosshair":
@@ -2848,8 +3037,8 @@ class OceanLabApp:
 
     def toggle_connection(self) -> None:
         if self.connected and not self.simulation_mode:
-            if self.single_in_progress:
-                self.cancel_single_acquisition()
+            self.connection_pending = True
+            self.update_acquisition_buttons()
             self.status_var.set("正在断开仪器…")
             self.connect_button.configure(text="断开中…", state="disabled", style="Connected.TButton")
             self.worker.send("disconnect")
@@ -2887,12 +3076,9 @@ class OceanLabApp:
         self.device_info = info
         self.wavelengths = list(simulated.wavelengths)
         self.raw_spectrum = []
-        self.dark_spectrum = None
         self.reference_spectrum = None
         self.frame_context = None
-        self.dark_context = None
         self.reference_context = None
-        self.dark_timestamp = None
         self.reference_timestamp = None
         self.spectrum_service = SpectrumService()
         self.mode_var.set("原始强度")
@@ -2933,12 +3119,9 @@ class OceanLabApp:
         self.device_info = None
         self.wavelengths = []
         self.raw_spectrum = []
-        self.dark_spectrum = None
         self.reference_spectrum = None
         self.frame_context = None
-        self.dark_context = None
         self.reference_context = None
-        self.dark_timestamp = None
         self.reference_timestamp = None
         self.spectrum_service = SpectrumService()
         self.mode_var.set("原始强度")
@@ -3013,6 +3196,8 @@ class OceanLabApp:
         self.single_in_progress = False
         self.single_started_at = None
         self.single_expected_s = 0.0
+        self.active_acquisition_request_id = None
+        self.acquisition_pending = False
         self.update_acquisition_buttons()
         self.reset_acquisition_indicator()
 
@@ -3047,6 +3232,8 @@ class OceanLabApp:
         elapsed = time.monotonic() - self.single_started_at
         progress = min(95.0, 95.0 * elapsed / max(0.001, self.single_expected_s))
         self.single_progress_var.set(progress)
+        if elapsed > self.single_expected_s + 1.0:
+            self.status_var.set(f"单次采集仍在等待仪器返回，已等待 {elapsed:.1f} 秒；可取消本次数据并等待设备就绪")
         self.single_progress_after_id = self.root.after(40, self.update_single_progress)
 
     def complete_simulated_single(self) -> None:
@@ -3062,6 +3249,8 @@ class OceanLabApp:
         self.single_in_progress = False
         self.single_started_at = None
         self.single_expected_s = 0.0
+        self.active_acquisition_request_id = None
+        self.acquisition_pending = False
         self.acquisition_progress.stop()
         self.acquisition_progress.configure(
             mode="determinate",
@@ -3147,7 +3336,14 @@ class OceanLabApp:
         spectrum: list[float],
         timestamp: float,
         context: SpectrumContext | None = None,
+        request_id: str | None = None,
     ) -> None:
+        if self.cancel_requested:
+            logger.info("Discarding spectrum after cancellation: request=%s", request_id)
+            return
+        if not self.simulation_mode and request_id != self.active_acquisition_request_id:
+            logger.info("Discarding stale spectrum: request=%s active=%s", request_id, self.active_acquisition_request_id)
+            return
         if len(spectrum) != len(self.wavelengths):
             self.status_var.set(
                 f"已忽略长度不匹配的光谱：{len(spectrum)} 点，当前波长轴 {len(self.wavelengths)} 点"
@@ -3169,10 +3365,6 @@ class OceanLabApp:
         else:
             self._displayed_single_capture_id = None
             self._show_single_capture_history = False
-        if self.spectrum_service.baselines.dark is None:
-            self.dark_spectrum = None
-            self.dark_context = None
-            self.dark_timestamp = None
         if self.spectrum_service.baselines.reference is None:
             self.reference_spectrum = None
             self.reference_context = None
@@ -3189,7 +3381,7 @@ class OceanLabApp:
             self.finish_single_acquisition(success=True)
 
     def start_acquisition(self) -> None:
-        if self.connected and not self.acquiring and not self.single_in_progress:
+        if self.connected and not self.connection_pending and not self.acquiring and not self.single_in_progress and not self.acquisition_pending:
             settings = self.prepare_settings_for_acquisition()
             if settings is None:
                 return
@@ -3201,10 +3393,10 @@ class OceanLabApp:
                 self.simulation_tick()
                 return
             self.status_var.set("正在同步当前参数并开始连续采集…")
-            self.worker.send("configure_start", **self.acquisition_payload(settings))
+            self.send_configuration("configure_start", settings)
 
     def single_acquisition(self) -> None:
-        if self.connected and not self.acquiring and not self.single_in_progress:
+        if self.connected and not self.connection_pending and not self.acquiring and not self.single_in_progress and not self.acquisition_pending:
             settings = self.prepare_settings_for_acquisition()
             if settings is None:
                 return
@@ -3215,7 +3407,15 @@ class OceanLabApp:
                 self.status_var.set(f"模拟单次采集中，预计 {self.single_expected_s:.2f} 秒")
                 return
             self.status_var.set(f"正在采集单帧光谱，预计至少 {self.single_expected_s:.2f} 秒…")
-            self.worker.send("configure_single", **self.acquisition_payload(settings))
+            self.send_configuration("configure_single", settings)
+
+    def send_configuration(self, command: str, settings: dict[str, int]) -> None:
+        self.cancel_requested = False
+        self.active_acquisition_request_id = str(self._next_acquisition_request_id)
+        self._next_acquisition_request_id += 1
+        self.acquisition_pending = True
+        self.update_acquisition_buttons()
+        self.worker.send(command, request_id=self.active_acquisition_request_id, **self.acquisition_payload(settings))
 
     def stop_acquisition(self) -> None:
         if self.single_in_progress and self.simulation_mode:
@@ -3225,13 +3425,22 @@ class OceanLabApp:
             self.set_status_lamp("#d97706")
             self.status_var.set("模拟单次采集已取消；未生成或保存本次数据")
             return
-        if self.acquiring:
-            if self.simulation_mode:
-                self.cancel_simulation_timer()
-                self.set_acquisition_state(False)
-                return
-            self.status_var.set("正在暂停采集…")
-            self.worker.send("stop")
+        if self.cancel_requested:
+            return
+        if not self.simulation_mode and (self.single_in_progress or self.acquisition_pending or self.acquiring):
+            self.cancel_requested = True
+            self.acquisition_pending = True
+            self.cancel_single_timers()
+            self.update_acquisition_buttons()
+            waiting = "正在取消单次" if self.single_in_progress else "正在暂停"
+            self.run_state_var.set(waiting)
+            self.run_state_label.configure(style="RunPending.TLabel")
+            self.status_var.set(f"{waiting}，等待当前扫描或参数同步结束；不再继续剩余平均，仪器保持连接…")
+            self.worker.send("stop", request_id=self.active_acquisition_request_id)
+            return
+        if self.acquiring and self.simulation_mode:
+            self.cancel_simulation_timer()
+            self.set_acquisition_state(False)
 
     def prepare_settings_for_acquisition(self) -> dict[str, int] | None:
         """Validate the visible settings; hardware application is one atomic worker command."""
@@ -3272,7 +3481,7 @@ class OceanLabApp:
     def apply_settings(self) -> None:
         from tkinter import messagebox
 
-        if self.single_in_progress:
+        if self.single_in_progress or self.acquisition_pending:
             self.status_var.set("单次采集完成后再应用参数")
             return
         if self.acquiring and not self.simulation_mode:
@@ -3293,62 +3502,19 @@ class OceanLabApp:
                     self.accept_spectrum(self.generate_simulated_spectrum(), time.time())
                 self.status_var.set("模拟采集参数已应用")
                 return
-            self.worker.send(
-                "settings",
-                integration_us=settings["integration_us"],
-                averages=settings["averages"],
-                boxcar=settings["boxcar"],
-                interval_ms=settings["interval_ms"],
-            )
-            self.apply_corrections()
-            self.apply_device_options()
+            self.send_configuration("configure", settings)
             self.status_var.set("正在应用采集参数…")
             self.settings_state_var.set("正在同步参数…")
         except ValueError as exc:
             messagebox.showerror("参数错误", str(exc) or "请输入有效的积分时间、平均次数、刷新间隔和平滑宽度。")
 
     def apply_corrections(self) -> None:
-        if self.simulation_mode:
-            return
-        apply_electric_dark = self.device_capabilities["electric_dark"]
-        apply_nonlinearity = self.device_capabilities["nonlinearity"]
-        if apply_electric_dark or apply_nonlinearity:
-            self.worker.send(
-                "corrections",
-                electric_dark=self.electric_dark_var.get(),
-                nonlinearity=self.nonlinearity_var.get(),
-                apply_electric_dark=apply_electric_dark,
-                apply_nonlinearity=apply_nonlinearity,
-            )
+        if not self.simulation_mode and self.connected:
+            self.apply_settings()
 
     def apply_device_options(self) -> None:
-        if self.simulation_mode:
-            return
-        apply_trigger = self.device_capabilities["trigger"]
-        apply_light_source = self.device_capabilities["light_source"]
-        if apply_trigger or apply_light_source:
-            self.worker.send(
-                "device_options",
-                trigger_mode=TRIGGER_MODE_TO_VALUE.get(self.trigger_mode_var.get(), 0),
-                light_source=self.light_source_var.get(),
-                apply_trigger=apply_trigger,
-                apply_light_source=apply_light_source,
-            )
-
-    def capture_dark(self) -> None:
-        from tkinter import messagebox
-
-        if not self.raw_spectrum or self.frame_context is None:
-            messagebox.showwarning("没有数据", "请先采集一帧光谱。")
-            return
-        self.dark_spectrum = self.raw_spectrum.copy()
-        self.dark_context = self.frame_context
-        self.dark_timestamp = self.last_timestamp
-        self.spectrum_service.capture_dark()
-        self.mark_save_pending()
-        self.status_var.set("已记录暗谱")
-        self.update_baseline_state()
-        self.refresh_plot()
+        if not self.simulation_mode and self.connected:
+            self.apply_settings()
 
     def capture_reference(self) -> None:
         from tkinter import messagebox
@@ -3365,45 +3531,23 @@ class OceanLabApp:
         self.update_baseline_state()
         self.refresh_plot()
 
-    def clear_dark(self) -> None:
-        self.dark_spectrum = None
-        self.dark_context = None
-        self.dark_timestamp = None
-        self.spectrum_service.clear_dark()
-        self.mark_save_pending()
-        self.status_var.set("已清除共享暗谱")
-        self.update_baseline_state()
-        self.refresh_plot()
-
     def clear_baselines(self) -> None:
-        self.dark_spectrum = None
         self.reference_spectrum = None
-        self.dark_context = None
         self.reference_context = None
-        self.dark_timestamp = None
         self.reference_timestamp = None
         self.spectrum_service.clear_baselines()
         self.mark_save_pending()
-        self.status_var.set("已清除暗谱和参考谱")
+        self.status_var.set("已清除参考谱")
         self.update_baseline_state()
         self.refresh_plot()
 
     def update_baseline_state(self) -> None:
-        dark_recorded = self.dark_spectrum is not None
         reference_recorded = self.reference_spectrum is not None
-        dark = "已记录" if dark_recorded else "未记录"
-        reference = "已记录" if reference_recorded else "未记录"
-        self.baseline_state_var.set(f"暗谱：{dark}    参考谱：{reference}")
-        self.dark_state_var.set(f"共享暗谱：{dark}")
+        self.baseline_state_var.set("参考谱：已记录" if reference_recorded else "参考谱：未记录")
         if hasattr(self, "baseline_state_label"):
-            if dark_recorded and reference_recorded:
-                status_style = "BaselineReady.TLabel"
-            elif dark_recorded or reference_recorded:
-                status_style = "BaselinePartial.TLabel"
-            else:
-                status_style = "BaselineEmpty.TLabel"
-            self.baseline_state_label.configure(style=status_style)
-            self.dark_button.configure(style="Selected.TButton" if dark_recorded else "TButton")
+            self.baseline_state_label.configure(
+                style="BaselineReady.TLabel" if reference_recorded else "BaselineEmpty.TLabel"
+            )
             self.processing_reference_button.configure(
                 style="Selected.TButton" if reference_recorded else "TButton"
             )
@@ -3421,12 +3565,13 @@ class OceanLabApp:
                     return [], "归一化强度"
             if mode == "原始强度":
                 return list(self.raw_spectrum), "强度 (counts)"
-            if mode == "Tauc 计算结果":
+            exponent = tauc_exponent(mode)
+            if exponent is not None:
                 absorbance, label = self.spectrum_service.processed(ProcessingMode.ABSORBANCE)
                 if not absorbance:
                     return [], label
-                values, _invalid = calculate_tauc_direct_values(self.wavelengths, absorbance)
-                return list(values), "Tauc (A·eV)²"
+                values, _invalid = calculate_tauc_values(self.wavelengths, absorbance, exponent)
+                return list(values), tauc_label(exponent)
             return self.spectrum_service.processed(ProcessingMode(mode))
         return [], "强度 (counts)"
 
@@ -3473,11 +3618,15 @@ class OceanLabApp:
             elif self.pl_result_service.entries:
                 self.pl_status_var.set(f"已显示 {len(result.series)} 条 PL 曲线")
         elif workspace == "AB吸收":
-            self.plot.set_empty_message("尚未载入 AB 数据", "选择样品信号和 BG 参考；仪器暗谱可选")
+            self.update_ab_offset_status()
+            self.plot.set_empty_message("尚未载入 AB 数据", "选择本组样品信号和 BG 参考")
             mode = self.ab_mode_var.get()
-            tauc = mode == "Tauc 计算结果"
-            result = self.historical_absorbance_service.build_plot(mode != "透过率 (%)", tauc=tauc)
-            label = "Tauc (A·eV)²" if tauc else mode
+            exponent = tauc_exponent(mode)
+            tauc = exponent is not None
+            result = self.historical_absorbance_service.build_plot(
+                mode != "透过率 (%)", tauc=tauc, tauc_exponent=exponent if tauc else 2.0)
+            self.ab_active_var.set(self.historical_absorbance_service.active_id or "")
+            label = tauc_label(exponent) if tauc else mode
             series = list(result.series)
             x_label = "波长 (nm)"
             if self.ab_x_axis_var.get() == "光子能量 (eV)":
@@ -3496,20 +3645,31 @@ class OceanLabApp:
                     ))
                 series = energy_series
                 x_label = "光子能量 (eV)"
-            self.plot.set_series(series, label, x_label, self.preferred_plot_y_bounds(label))
+            self.plot.set_series(series, label, x_label)
             historical = True
+            displayed = sum(any(math.isfinite(value) for value in item.values) for item in result.series)
+            current_group = self.historical_absorbance_service.current_group
+            current_hint = ""
+            if not current_group.entries:
+                current_hint = f"{current_group.name}等待样品；"
+            elif current_group.reference is None:
+                current_hint = f"{current_group.name}等待 BG；"
             if not self.historical_absorbance_service.entries:
                 self.ab_result_status_var.set("请选择一份或多份带样品信号")
-            elif self.historical_absorbance_service.reference is None:
-                self.ab_result_status_var.set("请选择 BG 参考；仪器暗谱可以不选")
             elif result.skipped:
                 skipped = "；".join(f"{name}：{reason}" for name, reason in result.skipped[:3])
-                self.ab_result_status_var.set(f"已显示 {len(result.series)} 条；未显示 {len(result.skipped)} 条（{skipped}）")
+                self.ab_result_status_var.set(f"{current_hint}已显示 {displayed} 条；未显示 {len(result.skipped)} 条（{skipped}）")
             elif result.series:
                 invalid = sum(count for _name, count in result.invalid_counts)
-                self.ab_result_status_var.set(f"已显示 {len(result.series)} 条 {label} 曲线；无效点共 {invalid}")
+                self.ab_result_status_var.set(f"{current_hint}已显示 {displayed} 条 {label} 曲线；无效点共 {invalid}")
             else:
                 self.ab_result_status_var.set("样品曲线均已隐藏")
+            if result.signal_warnings:
+                warnings = dict(result.signal_warnings)
+                active_name = next((item.name for item in result.series if item.active), "")
+                warning = warnings.get(active_name, result.signal_warnings[0][1])
+                self.ab_result_status_var.set(self.ab_result_status_var.get() +
+                                              f"\n{warning}；请检查原始信号")
         else:
             if workspace == "采集" and self._show_single_capture_history:
                 series = self.active_preset_single_capture_series()
@@ -3534,7 +3694,9 @@ class OceanLabApp:
                     label,
                     x_label,
                     self.preferred_plot_y_bounds(label),
+                    metadata=self.curve_context_metadata(self.frame_context, self.last_timestamp),
                 )
+        self.refresh_curve_save_state()
         self.update_single_history_warning(workspace)
         self.update_cursor_control_state()
         finite = [(x, y) for x, y in zip(self.plot.wavelengths, self.plot.values) if math.isfinite(y)]
@@ -4022,6 +4184,135 @@ class OceanLabApp:
         dialog.grab_set()
         dialog.focus_force()
 
+    @staticmethod
+    def curve_context_metadata(context, timestamp=None) -> tuple[tuple[str, str], ...]:
+        if context is None:
+            return ()
+        metadata = tuple((key, str(value)) for key, value in context.as_dict().items())
+        if timestamp is not None:
+            metadata += (("Frame time", datetime.fromtimestamp(timestamp).isoformat(timespec="milliseconds")),)
+        return metadata
+
+    @staticmethod
+    def curve_filename_part(value: str) -> str:
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip().rstrip(". ")[:48]
+        if not name:
+            name = "curve"
+        if name.split(".")[0].upper() in {"CON", "PRN", "AUX", "NUL", *("COM" + str(i) for i in range(1, 10)), *("LPT" + str(i) for i in range(1, 10))}:
+            name = "_" + name
+        return name
+
+    def displayed_export_curves(self) -> tuple[PlotSeries, ...]:
+        curves = tuple(item for item in self.plot.series if item.visible)
+        if self.current_workspace() == "采集" and curves:
+            curves = (next((item for item in curves if item.active), curves[0]),)
+        return tuple(item for item in curves if any(math.isfinite(y) for y in item.values))
+
+    def refresh_curve_save_state(self) -> None:
+        if not hasattr(self, "curve_save_button"):
+            return
+        saved = self.curve_export_verified.get(self.current_workspace())
+        curves = self.displayed_export_curves()
+        verified = bool(saved and saved[:2] == (self.plot.x_label, self.plot.y_label) and
+                        len(saved[2]) == len(curves) and curves and all(
+                            before.name == after.name and before.metadata == after.metadata and
+                            before.wavelengths == after.wavelengths and
+                            self.plot.series_values_equal(before.values, after.values)
+                            for before, after in zip(saved[2], curves)))
+        self.curve_save_button.configure(
+            style="Saved.PlotTool.TButton" if verified else "PlotTool.TButton",
+            image=self.curve_save_verified_icon if verified else self.curve_save_icon,
+        )
+
+    def curve_source_name(self, curve: PlotSeries) -> str:
+        source = dict(curve.metadata).get("Source file", "")
+        return Path(source).stem if source else curve.name.split("｜", 1)[-1].strip() or self.compose_save_base_name()
+
+    def curve_export_default_name(self, curve: PlotSeries, x_label: str, y_label: str) -> str:
+        group = dict(curve.metadata).get("Group", "")
+        mode = {"Tauc (A·eV)²": "Tauc_Direct_2", "Tauc (A·eV)^(1/2)": "Tauc_Indirect_1-2",
+                "归一化强度": "归一化", "强度 (counts)": "强度",
+                "吸光度 (A)": "吸光度", "透过率 (%)": "透过率"}.get(y_label, y_label)
+        axis = {"光子能量 (eV)": "eV", "波长 (nm)": "nm", "像素索引": "pixel"}.get(x_label, x_label)
+        parts = [self.curve_source_name(curve)] + ([group] if group else []) + [mode, axis]
+        return "_".join(self.curve_filename_part(part) for part in parts) + ".txt"
+
+    def save_plot_curves(self) -> None:
+        from tkinter import filedialog, messagebox
+
+        # Freeze displayed transformed arrays BEFORE a native dialog pumps Tk events.
+        workspace = self.current_workspace()
+        x_label, y_label = self.plot.x_label, self.plot.y_label
+        curves = self.displayed_export_curves()
+        if not curves:
+            messagebox.showwarning("没有数据", "当前图没有可保存的有效曲线。", parent=self.root)
+            return
+        verified_snapshot = (x_label, y_label, curves)
+        stamp = datetime.now()
+        common = (("OceanLab version", APP_VERSION), ("Workspace", workspace),
+                  ("Export time", stamp.isoformat(timespec="milliseconds")))
+        if x_label == "光子能量 (eV)" or "Tauc" in y_label:
+            common += (("Energy conversion", f"E_eV = {PHOTON_ENERGY_EV_NM} / wavelength_nm"),)
+        if workspace in ("采集", "处理"):
+            common += self.curve_context_metadata(self.frame_context, self.last_timestamp)
+            if workspace == "处理":
+                common += (("Display mode", self.mode_var.get()),
+                           ("Reference time", datetime.fromtimestamp(self.reference_timestamp).isoformat(timespec="milliseconds") if self.reference_timestamp else "None"),
+                           ("Formula", {
+                               "峰值归一化": "sample / max(sample)",
+                               "透过率 (%)": "sample / reference * 100",
+                               "吸光度 (A)": "-log10(sample / reference)",
+                               "Tauc 计算结果": "(-log10(sample / reference) * E_eV)^2",
+                               TAUC_DIRECT: "(-log10(sample / reference) * E_eV)^2",
+                               TAUC_INDIRECT: "(-log10(sample / reference) * E_eV)^(1/2)",
+                           }.get(self.mode_var.get(), "sample")))
+        # Give unnamed real-time data a useful name without changing the screen.
+        curves = tuple(replace(item, name=item.name or self.compose_save_base_name(),
+                               wavelengths=tuple(item.wavelengths), values=tuple(item.values)) for item in curves)
+        source = dict(curves[0].metadata).get("Source file", "")
+        folder = next((Path(value) for value in (self.curve_export_directory, str(Path(source).parent) if source else "",
+                                               self.save_directory_var.get(), str(Path.home() / "Desktop"), str(Path.home()))
+                       if value and Path(value).is_dir()), Path.home())
+        if len(curves) == 1:
+            selected = filedialog.asksaveasfilename(
+                parent=self.root, title="另存为", initialdir=str(folder),
+                initialfile=self.curve_export_default_name(curves[0], x_label, y_label),
+                defaultextension=".txt", filetypes=[("Text (*.txt)", "*.txt")], confirmoverwrite=True,
+            )
+        else:
+            selected = filedialog.askdirectory(parent=self.root, title=f"保存 {len(curves)} 条曲线 TXT：选择文件夹", initialdir=str(folder), mustexist=True)
+        if not selected:
+            return
+        chosen = Path(selected)
+        if len(curves) == 1 and chosen.suffix.lower() != ".txt":
+            chosen = chosen.with_name(chosen.name + ".txt")
+            if len(curves) == 1 and chosen.exists() and not messagebox.askyesno(
+                "覆盖文件", f"文件已存在，是否覆盖？\n{chosen}", parent=self.root,
+            ):
+                return
+        saved = []
+        try:
+            for curve in curves:
+                path = chosen if len(curves) == 1 else chosen / self.curve_export_default_name(curve, x_label, y_label)
+                if len(curves) > 1:
+                    original, duplicate = path, 2
+                    while path.exists():
+                        path = original.with_name(f"{original.stem}_{duplicate}.txt")
+                        duplicate += 1
+                result = self.spectrum_exporter.export_curve(CurveExportRequest(path, curve, x_label, y_label, common))
+                saved.append(result.path)
+            self.curve_export_directory = str((chosen.parent if len(curves) == 1 else chosen).resolve())
+            self.curve_export_verified[workspace] = verified_snapshot
+            self.refresh_curve_save_state()
+            self.save_preferences()
+            self.status_var.set(f"已保存并验证 {len(saved)} 条曲线 TXT：{saved[0] if len(saved) == 1 else chosen}")
+        except Exception as exc:
+            self.curve_export_verified.pop(workspace, None)
+            self.refresh_curve_save_state()
+            logger.exception("Current curve TXT export failed")
+            self.status_var.set(f"曲线保存失败；已完成 {len(saved)}/{len(curves)} 个文件")
+            messagebox.showerror("保存失败", f"{exc}\n\n已完成 {len(saved)}/{len(curves)} 个文件。", parent=self.root)
+
     def save_csv(self) -> None:
         from tkinter import filedialog, messagebox
 
@@ -4080,11 +4371,6 @@ class OceanLabApp:
             return
         try:
             frame = SpectrumFrame(tuple(self.raw_spectrum), self.last_timestamp or time.time(), context)
-            dark_frame = (
-                SpectrumFrame(tuple(self.dark_spectrum), self.dark_timestamp or frame.timestamp, self.dark_context)
-                if self.dark_spectrum is not None and self.dark_context is not None
-                else None
-            )
             reference_frame = (
                 SpectrumFrame(tuple(self.reference_spectrum), self.reference_timestamp or frame.timestamp, self.reference_context)
                 if self.reference_spectrum is not None and self.reference_context is not None
@@ -4105,8 +4391,8 @@ class OceanLabApp:
                 "nonlinearity_correction": str(context.nonlinearity),
                 "light_source": str(context.light_source),
                 "frame_context_json": json.dumps(context.as_dict(), ensure_ascii=False),
-                "dark_context_json": json.dumps(self.dark_context.as_dict(), ensure_ascii=False) if self.dark_context else "",
-                "dark_timestamp": datetime.fromtimestamp(self.dark_timestamp).isoformat(timespec="milliseconds") if self.dark_timestamp else "",
+                "dark_context_json": "",
+                "dark_timestamp": "",
                 "reference_context_json": json.dumps(self.reference_context.as_dict(), ensure_ascii=False) if self.reference_context else "",
                 "reference_timestamp": datetime.fromtimestamp(self.reference_timestamp).isoformat(timespec="milliseconds") if self.reference_timestamp else "",
                 "x_axis_display": "波长 (nm)" if self.current_workspace() == "AB吸收" else self.x_axis_var.get(),
@@ -4117,7 +4403,7 @@ class OceanLabApp:
                 wavelengths=self.wavelengths,
                 processed=processed,
                 processed_label=label,
-                baselines=BaselineSet(dark_frame, reference_frame),
+                baselines=BaselineSet(None, reference_frame),
                 metadata=metadata,
             ))
             verified_size = result.size
@@ -4185,22 +4471,21 @@ class OceanLabApp:
                     self.apply_range()
                     requested = self.prepare_settings_for_acquisition()
                     if requested is not None:
-                        self.worker.send("configure_single", **self.acquisition_payload(requested))
+                        self.send_configuration("configure", requested)
                 elif event == "disconnected":
                     if self.single_in_progress:
                         self.cancel_single_acquisition()
                     self.connected = False
+                    self.acquisition_pending = False
+                    self.active_acquisition_request_id = None
                     self.connection_pending = False
                     self.acquiring = False
                     self.device_info = None
                     self.wavelengths = []
                     self.raw_spectrum = []
                     self.frame_context = None
-                    self.dark_spectrum = None
                     self.reference_spectrum = None
-                    self.dark_context = None
                     self.reference_context = None
-                    self.dark_timestamp = None
                     self.reference_timestamp = None
                     self.spectrum_service = SpectrumService()
                     self.clear_single_capture_history()
@@ -4215,11 +4500,31 @@ class OceanLabApp:
                     self.refresh_plot()
                     self.status_var.set("正在安全关闭 OceanDirect…" if self.closing else "仪器已断开")
                 elif event == "acquisition_state":
+                    if payload.get("request_id") != self.active_acquisition_request_id:
+                        continue
+                    if payload["running"]:
+                        if self.cancel_requested:
+                            continue
+                        self.acquisition_pending = False
+                    elif self.cancel_requested:
+                        was_single = self.single_in_progress
+                        self.cancel_requested = False
+                        self.acquiring = False
+                        self.cancel_single_acquisition()
+                        self.set_acquisition_state(False, announce=False)
+                        if was_single:
+                            self.run_state_var.set("单次采集已取消")
+                        self.status_var.set("单次采集已取消，本次数据未保留；仪器保持连接" if was_single
+                                            else "采集已暂停；仪器保持连接")
+                        self.update_connection_buttons()
+                        continue
                     if not (self.single_in_progress and not payload["running"]):
                         self.set_acquisition_state(payload["running"])
                 elif event == "spectrum":
-                    self.accept_spectrum(payload["spectrum"], payload["timestamp"], payload.get("context"))
+                    self.accept_spectrum(payload["spectrum"], payload["timestamp"], payload.get("context"), payload.get("request_id"))
                 elif event == "configuration_applied":
+                    if payload.get("request_id") != self.active_acquisition_request_id:
+                        continue
                     settings = payload["settings"]
                     context = payload["context"]
                     self.sync_setting_values(settings, "采集配置已由仪器确认")
@@ -4231,7 +4536,17 @@ class OceanLabApp:
                         self.light_source_var.set(context.light_source)
                     finally:
                         self._syncing_settings = False
-                    self.status_var.set("仪器配置已确认，开始连续采集…" if payload["action"] == "start" else "仪器配置已确认，正在采集单帧…")
+                    if self.cancel_requested:
+                        self.update_acquisition_buttons()
+                        continue
+                    if payload["action"] != "start":
+                        self.acquisition_pending = False
+                    if payload["action"] == "configure":
+                        self.active_acquisition_request_id = None
+                        self.status_var.set("仪器配置已确认，可以开始采集")
+                    else:
+                        self.status_var.set("仪器配置已确认，开始连续采集…" if payload["action"] == "start" else "仪器配置已确认，正在采集单帧…")
+                    self.update_acquisition_buttons()
                 elif event == "settings_applied":
                     settings = payload["settings"]
                     self.sync_setting_values(settings)
@@ -4253,6 +4568,10 @@ class OceanLabApp:
                 elif event == "warning":
                     messagebox.showwarning("OceanDirect", payload["message"])
                 elif event == "error":
+                    logger.error("Device error: request=%s message=%s", payload.get("request_id"), payload["message"])
+                    self.acquisition_pending = False
+                    self.cancel_requested = False
+                    self.active_acquisition_request_id = None
                     self.connection_pending = False
                     self.status_var.set(payload["message"])
                     if self.single_in_progress:
@@ -4266,7 +4585,8 @@ class OceanLabApp:
                     if not self.connected and not self.closing:
                         self.device_status_label.configure(text="未连接", style="DeviceOff.TLabel")
                     self.update_connection_buttons()
-                    messagebox.showerror("OceanDirect 错误", payload["message"])
+                    if not payload.get("cancelled") and not self.closing:
+                        messagebox.showerror("OceanDirect 错误", payload["message"])
                 elif event == "fatal":
                     self.sdk_available = False
                     self.connection_pending = False
@@ -4290,8 +4610,23 @@ class OceanLabApp:
                     return
         except queue.Empty:
             pass
-        if self.root.winfo_exists():
-            self.root.after(1 if not self.events.empty() else 50, self.poll_events)
+        except Exception as exc:
+            logger.exception("Acquisition event processing failed")
+            if self.single_in_progress:
+                self.finish_single_acquisition(success=False)
+            self.acquisition_pending = False
+            self.status_var.set(f"数据处理失败：{exc}；日志：{LOG_FILE}")
+            self.update_acquisition_buttons()
+            if not self.closing:
+                messagebox.showerror("OceanLab 数据处理错误", f"{exc}\n\n日志：{LOG_FILE}")
+        finally:
+            # Rendering or event-handler errors must never stop receiving
+            # device state and spectrum events for the rest of the session.
+            try:
+                if self.root.winfo_exists():
+                    self.root.after(1 if not self.events.empty() else 50, self.poll_events)
+            except self.tk.TclError:
+                pass
 
     def on_close(self) -> None:
         if self.closing:

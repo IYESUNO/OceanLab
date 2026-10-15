@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "2.0.2"
+    [string]$Version = "2.1.2"
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,9 +48,15 @@ if ($PyInstallerVersion -ne "5.13.2") {
 }
 
 Write-Host "Running tests with Python $PythonVersion..."
-& $PythonExe -m unittest discover -s (Join-Path $PSScriptRoot "tests") -v
-if ($LASTEXITCODE -ne 0) {
-    throw "Python 3.7 test suite failed"
+Push-Location $PSScriptRoot
+try {
+    & $PythonExe -m unittest discover -s tests -v
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python 3.7 test suite failed"
+    }
+}
+finally {
+    Pop-Location
 }
 
 New-Item -ItemType Directory -Force -Path $DistRoot, $WorkRoot, $SpecRoot, $ReleaseRoot | Out-Null
@@ -163,6 +169,9 @@ foreach ($RuntimeFile in $RuntimeFiles) {
     Copy-Item -LiteralPath $RuntimePath -Destination $BundleRoot -Force
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "README.md") -Destination $BundleRoot
+New-Item -ItemType Directory -Force -Path (Join-Path $BundleRoot "docs") | Out-Null
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "docs\acquisition-defaults-audit.md") `
+    -Destination (Join-Path $BundleRoot "docs\acquisition-defaults-audit.md")
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "Launch_OceanLab.cmd") -Destination $BundleRoot
 Copy-Item `
     -LiteralPath (Join-Path $PSScriptRoot "packaging\PORTABLE_README_WIN7.txt") `

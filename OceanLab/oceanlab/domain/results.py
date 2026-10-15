@@ -37,11 +37,22 @@ class PlotSeries:
     visible: bool = True
     active: bool = False
     dash: tuple[int, ...] | None = None
+    metadata: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
 class PlResultEntry:
     entry_id: str
+    spectrum: ImportedSpectrum
+    display_name: str
+    color: str
+    visible: bool = True
+
+
+@dataclass(frozen=True)
+class AbsorbanceSampleEntry:
+    entry_id: str
+    group_id: str
     spectrum: ImportedSpectrum
     display_name: str
     color: str

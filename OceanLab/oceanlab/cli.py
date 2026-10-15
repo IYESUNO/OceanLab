@@ -2,41 +2,61 @@ from __future__ import annotations
 
 import argparse
 import logging
+import multiprocessing
 import sys
+from dataclasses import replace
+from functools import partial
 
 from .adapters.oceandirect import OceanDirectSpectrometer, is_oceandirect_home, resolve_oceandirect_home
+from .adapters.isolated_spectrometer import IsolatedSpectrometer
 from .bootstrap import configure_log_file, run_gui
-from .config import APP_VERSION
+from .config import APP_VERSION, SIMULATION_SETTINGS
 
 
 LOG_FILE = configure_log_file()
 logger = logging.getLogger("OceanLab")
 
 
+def diagnostic_output(*values) -> None:
+    if sys.stdout is not None:
+        print(*values)
+    else:
+        logger.info(" ".join(map(str, values)))
+
+
 def probe_device(sdk_home, acquire_once: bool = False) -> int:
-    adapter = OceanDirectSpectrometer(sdk_home)
+    adapter = IsolatedSpectrometer(partial(OceanDirectSpectrometer, sdk_home))
     try:
         version = adapter.initialize()
-        print("OceanDirect API:", ".".join(map(str, version)))
+        diagnostic_output("OceanDirect API:", ".".join(map(str, version)))
         connected = adapter.connect()
         info = connected.info
-        print("USB devices: 1")
-        print(
+        diagnostic_output("USB devices: 1")
+        diagnostic_output(
             f"- ID={info.device_id}, model={info.model}, serial={info.serial}, "
             f"pixels={info.pixels}, range={info.wavelength_min:.2f}-{info.wavelength_max:.2f} nm"
         )
         if acquire_once:
-            context = adapter.apply_configuration(connected.settings)
+            capabilities = info.capabilities
+            request = replace(
+                connected.settings, **SIMULATION_SETTINGS,
+                trigger_mode=0, electric_dark=capabilities.electric_dark,
+                nonlinearity=False, light_source=False,
+                apply_electric_dark=capabilities.electric_dark,
+                apply_nonlinearity=capabilities.nonlinearity,
+                apply_trigger=capabilities.trigger, apply_light_source=capabilities.light_source,
+            )
+            context = adapter.apply_configuration(request)
             frame = adapter.acquire(context)
             peak_index = max(range(len(frame.values)), key=frame.values.__getitem__)
-            print(
+            diagnostic_output(
                 f"  integration={context.integration_us} us, "
                 f"peak={frame.values[peak_index]:.6g} @ {connected.wavelengths[peak_index]:.3f} nm"
             )
         return 0
     except RuntimeError as exc:
         if "未发现" in str(exc):
-            print("USB devices: 0")
+            diagnostic_output("USB devices: 0")
             return 2
         raise
     finally:
@@ -66,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def entrypoint() -> None:
+    multiprocessing.freeze_support()
     try:
         raise SystemExit(main())
     except SystemExit:

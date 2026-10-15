@@ -67,6 +67,16 @@ class SpectrumImportAndResultsTest(unittest.TestCase):
         self.assertEqual(spectrum.metadata_dict()["sample"], "样品")
         self.assertEqual(spectrum.name, "样品基本名")
 
+    def test_ab_legacy_file_uses_raw_signal_without_embedded_dark(self) -> None:
+        service = HistoricalAbsorbanceService(self.importer)
+        sample = self.write_oceanlab()
+        reference = self.write_two_column("bg.csv", (11.0, 21.0, 41.0))
+        service.load_samples((sample,))
+        service.load_reference(reference)
+        transmission = service.build_plot(False).series[0].values
+        self.assertAlmostEqual(transmission[0], 6.0 / 11.0 * 100.0)
+        self.assertNotAlmostEqual(transmission[0], 50.0)
+
     def test_imports_oceanview_gb18030_two_column_format_and_node_name(self) -> None:
         path = self.directory / "renamed_file.txt"
         text = "\r\n".join((
@@ -166,18 +176,16 @@ class SpectrumImportAndResultsTest(unittest.TestCase):
         self.assertFalse(result.series)
         self.assertIn("正峰值", result.skipped[0][1])
 
-    def test_absorbance_multiple_samples_with_optional_dark(self) -> None:
+    def test_absorbance_multiple_samples_use_only_sample_and_reference(self) -> None:
         service = HistoricalAbsorbanceService(self.importer)
-        sample = self.write_two_column("sample.csv", (6.0, 11.0, 21.0))
-        sample_two = self.write_two_column("sample-two.csv", (21.0, 41.0, 81.0))
-        dark = self.write_two_column("dark.csv", (1.0, 1.0, 1.0))
-        reference = self.write_two_column("reference.csv", (11.0, 21.0, 41.0))
+        sample = self.write_two_column("sample.csv", (5.0, 10.0, 20.0))
+        sample_two = self.write_two_column("sample-two.csv", (20.0, 40.0, 80.0))
+        reference = self.write_two_column("reference.csv", (10.0, 20.0, 40.0))
         service.load_samples((sample, sample_two))
         service.load_reference(reference)
         without_dark = service.build_plot(absorbance=False)
         self.assertEqual(len(without_dark.series), 2)
-        self.assertAlmostEqual(without_dark.series[0].values[0], 6.0 / 11.0 * 100.0)
-        service.load_dark(dark)
+        self.assertAlmostEqual(without_dark.series[0].values[0], 5.0 / 10.0 * 100.0)
         transmission = service.build_plot(absorbance=False)
         absorbance = service.build_plot(absorbance=True)
         self.assertEqual(transmission.series[0].values, (50.0, 50.0, 50.0))
@@ -193,28 +201,23 @@ class SpectrumImportAndResultsTest(unittest.TestCase):
         self.assertTrue(all(math.isfinite(value) for value in tauc.series[1].values))
         service.set_active(service.entries[0].entry_id)
         self.assertTrue(service.build_plot(True).series[0].active)
-        service.clear_dark()
-        self.assertAlmostEqual(service.build_plot(False).series[0].values[0], 6.0 / 11.0 * 100.0)
+        self.assertAlmostEqual(service.build_plot(False).series[0].values[0], 5.0 / 10.0 * 100.0)
 
     def test_absorbance_rejects_grid_mismatch_and_counts_invalid_points(self) -> None:
         sample = self.write_two_column("sample.csv", (1.0, 2.0, 3.0))
-        dark = self.write_two_column("dark.csv", (1.0, 1.0, 1.0))
         reference = self.directory / "reference.csv"
         reference.write_text("x,y\n350,2\n351.5,2\n352,2\n", encoding="utf-8")
         service = HistoricalAbsorbanceService(self.importer)
         service.load_samples((sample,))
-        service.load_reference(reference)
-        mismatch = service.build_plot(absorbance=False)
-        self.assertFalse(mismatch.series)
-        self.assertIn("波长网格", mismatch.skipped[0][1])
+        with self.assertRaisesRegex(ValueError, "波长网格"):
+            service.load_reference(reference)
+        self.assertIsNone(service.reference)
 
-        zero_sample = self.write_two_column("zero-sample.csv", (1.0, 1.0, 1.0))
-        zero_dark = self.write_two_column("zero-dark.csv", (1.0, 1.0, 1.0))
+        zero_sample = self.write_two_column("zero-sample.csv", (0.0, 0.0, 0.0))
         valid_reference = self.write_two_column("valid-reference.csv", (1.0, 2.0, 3.0))
         service.clear()
         service.load_samples((zero_sample,))
         service.load_reference(valid_reference)
-        service.load_dark(zero_dark)
         result = service.build_plot(absorbance=True)
         self.assertEqual(result.invalid_counts[0][1], 3)
         self.assertTrue(all(math.isnan(value) for value in result.series[0].values))

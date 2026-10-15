@@ -1,6 +1,8 @@
 from __future__ import annotations
 import queue
+import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from oceanlab.adapters.oceandirect import OceanDirectSpectrometer, default_saturation_intensity
@@ -78,6 +80,12 @@ class FakeDevice:
     def get_formatted_spectrum(self) -> list[float]:
         return [10.0, 20.0, 30.0]
 
+    def nonlinearity_correct_spectrum2(self, dark, values):
+        return list(values)
+
+    def boxcar_correct_spectrum(self, values, width):
+        return list(values)
+
 
 def make_adapter(device: FakeDevice) -> OceanDirectSpectrometer:
     adapter = OceanDirectSpectrometer(Path("missing-sdk"))
@@ -105,10 +113,149 @@ def make_adapter(device: FakeDevice) -> OceanDirectSpectrometer:
 
 
 class DevicePipelineTest(unittest.TestCase):
-    def test_known_qe65000_uses_usable_saturation_reference(self) -> None:
-        self.assertEqual(default_saturation_intensity("QE65000", 65_535.0), 63_000.0)
-        self.assertEqual(default_saturation_intensity("QE65 Pro", 65_535.0), 63_000.0)
+    def test_detector_maximum_is_not_replaced_with_a_corrected_plateau(self) -> None:
+        self.assertEqual(default_saturation_intensity("QE65000", 65_535.0), 65_535.0)
+        self.assertEqual(default_saturation_intensity("QE65 Pro", 65_535.0), 65_535.0)
         self.assertEqual(default_saturation_intensity("FAKE", 65_535.0), 65_535.0)
+
+    def test_official_sdk_is_the_only_acquisition_processing_path(self) -> None:
+        device = FakeDevice()
+        returned = [-8032.8125, 55037.2875, -6990.9625]
+        device.get_formatted_spectrum = mock.Mock(return_value=returned)
+        # These vendor methods perform a separate correction route. Calling
+        # them on the configured spectrum would duplicate/conflict correction.
+        device.get_dark_corrected_spectrum1 = mock.Mock()
+        device.get_nonlinearity_corrected_spectrum1 = mock.Mock()
+        device.boxcar_correct_spectrum = mock.Mock()
+        adapter = make_adapter(device)
+        request = AcquisitionRequest(100_000, 1, 3, 80, electric_dark=True,
+                                     nonlinearity=False, apply_electric_dark=True,
+                                     apply_nonlinearity=True)
+        context = adapter.apply_configuration(request)
+        frame = adapter.acquire(context)
+        self.assertEqual((device.averages, device.boxcar), (1, 3))
+        self.assertTrue(device.electric_dark)
+        self.assertFalse(device.nonlinearity)
+        self.assertEqual(frame.values, tuple(returned))
+        device.get_formatted_spectrum.assert_called_once_with()
+        device.get_dark_corrected_spectrum1.assert_not_called()
+        device.get_nonlinearity_corrected_spectrum1.assert_not_called()
+        device.boxcar_correct_spectrum.assert_not_called()
+
+    def test_batch_average_precedes_official_nonlinearity_and_boxcar(self) -> None:
+        device = FakeDevice()
+        adapter = make_adapter(device)
+        context = adapter.apply_configuration(AcquisitionRequest(
+            100_000, 2, 3, 80, electric_dark=True, nonlinearity=True,
+            apply_electric_dark=True, apply_nonlinearity=True,
+        ))
+        calls = []
+        scans = iter(([2.0, 4.0, 6.0], [4.0, 8.0, 12.0]))
+        def read():
+            self.assertEqual((device.averages, device.boxcar, device.nonlinearity), (1, 0, False))
+            self.assertTrue(device.electric_dark)
+            calls.append("read")
+            return next(scans)
+        def nlc(dark, values):
+            self.assertFalse(device.electric_dark)
+            self.assertFalse(device.nonlinearity)
+            self.assertEqual(dark, [0.0, 0.0, 0.0])
+            self.assertEqual(values, [3.0, 6.0, 9.0])
+            calls.append("nlc")
+            return [value ** 2 for value in values]
+        def boxcar(values, width):
+            self.assertEqual((values, width), ([9.0, 36.0, 81.0], 3))
+            calls.append("boxcar")
+            return values
+        device.get_formatted_spectrum = read
+        device.nonlinearity_correct_spectrum2 = nlc
+        device.boxcar_correct_spectrum = boxcar
+        frame = adapter.acquire(context)
+        self.assertEqual(frame.values, (9.0, 36.0, 81.0))
+        self.assertEqual(frame.context.averages, 2)
+        self.assertEqual(calls, ["read", "read", "nlc", "boxcar"])
+        self.assertEqual((device.averages, device.boxcar, device.nonlinearity), (2, 3, True))
+        self.assertTrue(device.electric_dark)
+
+    def test_pause_after_current_scan_skips_remaining_average_and_restores_settings(self) -> None:
+        device = FakeDevice()
+        adapter = make_adapter(device)
+        pause = threading.Event()
+        adapter.bind_pause_event(pause)
+        context = adapter.apply_configuration(AcquisitionRequest(3_000_000, 20, 0, 80))
+        def read():
+            self.assertEqual(device.averages, 1)
+            pause.set()
+            return [10.0, 20.0, 30.0]
+        device.get_formatted_spectrum = mock.Mock(side_effect=read)
+        self.assertIsNone(adapter.acquire(context))
+        device.get_formatted_spectrum.assert_called_once_with()
+        self.assertEqual(device.averages, 20)
+        pause.clear()
+        device.get_formatted_spectrum = mock.Mock(return_value=[10.0, 20.0, 30.0])
+        self.assertEqual(adapter.acquire(context).values, (10.0, 20.0, 30.0))
+        self.assertEqual(device.get_formatted_spectrum.call_count, 20)
+
+    def test_scan_failure_restores_batch_configuration_and_rejects_data(self) -> None:
+        device = FakeDevice()
+        adapter = make_adapter(device)
+        context = adapter.apply_configuration(AcquisitionRequest(100, 20, 3, 80))
+        device.get_formatted_spectrum = mock.Mock(side_effect=[[1.0, 2.0, 3.0], [float("nan"), 2.0, 3.0]])
+        with self.assertRaisesRegex(RuntimeError, "非有限"):
+            adapter.acquire(context)
+        self.assertEqual((device.averages, device.boxcar), (20, 3))
+
+    def test_pause_restoration_failure_is_not_a_successful_pause(self) -> None:
+        device = FakeDevice()
+        adapter = make_adapter(device)
+        pause = threading.Event()
+        adapter.bind_pause_event(pause)
+        context = adapter.apply_configuration(AcquisitionRequest(100, 20, 0, 80))
+        def read():
+            pause.set()
+            return [1.0, 2.0, 3.0]
+        device.get_formatted_spectrum = read
+        device.set_scans_to_average = lambda value: setattr(device, "averages", 1)
+        with self.assertRaisesRegex(RuntimeError, "读回不一致"):
+            adapter.acquire(context)
+
+    def test_coupled_sdk_switch_is_rejected_after_all_writes(self) -> None:
+        class CoupledDevice(FakeDevice):
+            def set_nonlinearity_correction_usage(self, value):
+                super().set_nonlinearity_correction_usage(value)
+                if value:
+                    self.electric_dark = True
+        adapter = make_adapter(CoupledDevice())
+        request = AcquisitionRequest(100, 1, 0, 80, electric_dark=False,
+                                     nonlinearity=True, apply_electric_dark=True,
+                                     apply_nonlinearity=True)
+        with self.assertRaisesRegex(RuntimeError, "electric_dark 最终读回"):
+            adapter.apply_configuration(request)
+        self.assertFalse(adapter.device.electric_dark)
+        self.assertFalse(adapter.device.nonlinearity)
+
+    def test_unrequested_coupled_switch_records_final_actual_value(self) -> None:
+        class CoupledDevice(FakeDevice):
+            def set_nonlinearity_correction_usage(self, value):
+                super().set_nonlinearity_correction_usage(value)
+                if value:
+                    self.electric_dark = True
+        adapter = make_adapter(CoupledDevice())
+        context = adapter.apply_configuration(AcquisitionRequest(
+            100, 1, 0, 80, nonlinearity=True, apply_nonlinearity=True,
+        ))
+        self.assertTrue(context.electric_dark)
+        self.assertTrue(context.nonlinearity)
+
+    def test_optional_setter_cannot_silently_change_core_settings(self) -> None:
+        class CoupledDevice(FakeDevice):
+            def set_trigger_mode(self, value):
+                super().set_trigger_mode(value)
+                self.boxcar = 9
+        adapter = make_adapter(CoupledDevice())
+        with self.assertRaisesRegex(RuntimeError, "boxcar 最终读回"):
+            adapter.apply_configuration(AcquisitionRequest(100, 1, 0, 80,
+                                                           trigger_mode=1, apply_trigger=True))
 
     def test_unconfigured_start_is_rejected(self) -> None:
         events = CoalescingEventQueue()
@@ -174,6 +321,24 @@ class DevicePipelineTest(unittest.TestCase):
         self.assertTrue(context.nonlinearity)
         self.assertEqual(context.trigger_mode, 1)
         self.assertTrue(context.light_source)
+
+    def test_unchanged_settings_are_verified_without_rewriting_device(self) -> None:
+        device = FakeDevice()
+        setter_names = ("set_integration_time", "set_scans_to_average", "set_boxcar_width",
+                        "set_electric_dark_correction_usage", "set_nonlinearity_correction_usage", "set_trigger_mode")
+        for name in setter_names:
+            setattr(device, name, mock.Mock(wraps=getattr(device, name)))
+        device.Advanced.set_enable_lamp = mock.Mock(wraps=device.Advanced.set_enable_lamp)
+        device.get_integration_time = mock.Mock(wraps=device.get_integration_time)
+        adapter = make_adapter(device)
+        request = AcquisitionRequest(100, 1, 0, 80, apply_electric_dark=True,
+                                     apply_nonlinearity=True, apply_trigger=True, apply_light_source=True)
+        context = adapter.apply_configuration(request)
+        self.assertEqual(context.integration_us, 100)
+        self.assertGreaterEqual(device.get_integration_time.call_count, 2)
+        for name in setter_names:
+            getattr(device, name).assert_not_called()
+        device.Advanced.set_enable_lamp.assert_not_called()
 
     def test_closed_sdk_cache_entry_is_removed(self) -> None:
         class FakeAPI:

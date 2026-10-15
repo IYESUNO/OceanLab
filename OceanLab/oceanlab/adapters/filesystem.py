@@ -9,7 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..ports.exporter import ExportRequest, ExportResult
+from ..ports.exporter import CurveExportRequest, ExportRequest, ExportResult
+from .curve_txt import CurveTxtExporter
 
 
 class JsonPreferencesRepository:
@@ -50,6 +51,9 @@ class JsonPreferencesRepository:
 class DelimitedSpectrumExporter:
     OCEANVIEW_USER = "360"
     OCEANVIEW_MARKER = ">>>>>Begin Spectral Data<<<<<"
+
+    def export_curve(self, request: CurveExportRequest) -> ExportResult:
+        return CurveTxtExporter().export(request)
 
     def export(self, request: ExportRequest) -> ExportResult:
         request.path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,7 +147,7 @@ class DelimitedSpectrumExporter:
             self.OCEANVIEW_MARKER,
         ]
         lines.extend(
-            f"{float(wavelength):.12g}\t{float(intensity):.12g}"
+            f"{wavelength:.12g}\t{intensity:.12g}"
             for wavelength, intensity in zip(request.wavelengths, frame.values)
         )
         temporary: Path | None = None

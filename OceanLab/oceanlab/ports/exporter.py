@@ -7,6 +7,7 @@ from typing import Sequence
 from ._typing import Protocol
 
 from ..domain.models import BaselineSet, SpectrumFrame
+from ..domain.results import PlotSeries
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,18 @@ class ExportResult:
     size: int
 
 
+@dataclass(frozen=True)
+class CurveExportRequest:
+    path: Path
+    curve: PlotSeries
+    x_label: str
+    y_label: str
+    metadata: tuple[tuple[str, str], ...] = ()
+
+
 class SpectrumExporter(Protocol):
     def export(self, request: ExportRequest) -> ExportResult: ...
 
     def verify(self, result: ExportResult, expected_rows: int) -> None: ...
+
+    def export_curve(self, request: CurveExportRequest) -> ExportResult: ...

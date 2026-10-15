@@ -15,8 +15,10 @@ class VersionConsistencyTest(unittest.TestCase):
         self.assertEqual(PACKAGE_VERSION, APP_VERSION)
         for relative_path in (
             "build_win7_legacy.ps1",
+            "build_win7_installer.ps1",
             "packaging/version_info.txt",
             "packaging/PORTABLE_README_WIN7.txt",
+            "packaging/INSTALLER_README_WIN7.txt",
             "README.md",
         ):
             content = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")

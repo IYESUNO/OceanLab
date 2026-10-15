@@ -1,0 +1,5 @@
+Lucide Icons: https://github.com/lucide-icons/lucide
+eye, eye-off, crosshair, palette, trash from the upstream SVGs in this folder.
+ISC / MIT notices: LICENSE.txt.
+Masks are antialiased alpha channels generated from these SVGs.
+OceanLab tints them at runtime using only Python standard library and Tk.

@@ -4,6 +4,7 @@ import math
 from enum import Enum
 
 from .models import BaselineSet, SpectrumFrame
+from .result_processing import transmission_ratio
 
 
 class ProcessingMode(str, Enum):
@@ -32,8 +33,7 @@ def process_spectrum(
             return [], "需要参考谱"
         values: list[float] = []
         for sample, reference, offset in zip(raw, reference_frame.values, dark):
-            denominator = reference - offset
-            ratio = (sample - offset) / denominator if abs(denominator) > 1e-12 else float("nan")
+            ratio = transmission_ratio(sample, reference, offset)
             if mode is ProcessingMode.TRANSMITTANCE:
                 values.append(ratio * 100.0)
             else:

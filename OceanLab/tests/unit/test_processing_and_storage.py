@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +37,19 @@ class ProcessingAndStorageTest(unittest.TestCase):
         cleared = service.accept(SpectrumFrame((2.0, 2.0, 2.0), 2.0, context(20_000)))
         self.assertEqual(cleared, ("暗谱",))
         self.assertIsNone(service.baselines.dark)
+
+    def test_nonpositive_reference_and_negative_signal_are_invalid_after_dark(self) -> None:
+        service = SpectrumService()
+        service.accept(SpectrumFrame((10.0, 10.0, 10.0), 1.0, context()))
+        service.capture_dark()
+        service.accept(SpectrumFrame((2.0, 10.0, 12.0), 2.0, context()))
+        service.capture_reference()
+        service.accept(SpectrumFrame((8.0, 12.0, 10.0), 3.0, context()))
+        transmission, _ = service.processed(ProcessingMode.TRANSMITTANCE)
+        absorbance, _ = service.processed(ProcessingMode.ABSORBANCE)
+        self.assertTrue(all(math.isnan(value) for value in transmission[:2]))
+        self.assertEqual(transmission[2], 0.0)
+        self.assertTrue(all(math.isnan(value) for value in absorbance))
 
     def test_preferences_round_trip_is_atomic_and_utf8(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

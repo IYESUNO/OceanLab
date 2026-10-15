@@ -148,6 +148,13 @@ class PlResultService:
                 values=tuple(values),
                 color=turbo_color(1.0 - index / turbo_denominator) if turbo_enabled else entry.color,
                 active=entry.entry_id == self.active_id,
+                metadata=entry.spectrum.metadata + (
+                    ("Source file", str(entry.spectrum.source_path)),
+                    ("BG", str(self.background.source_path) if self.background else "None"),
+                    ("Peak normalization", str(normalize)),
+                    ("Formula", "(sample - BG) / max(sample - BG)" if normalize and self.background else
+                     "sample / max(sample)" if normalize else "sample - BG" if self.background else "sample"),
+                ),
             ))
         return PlotBuildResult(tuple(series), tuple(skipped))
 
